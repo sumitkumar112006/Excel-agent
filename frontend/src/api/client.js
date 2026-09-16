@@ -3,6 +3,10 @@
  */
 
 const getApiBase = () => {
+  if (import.meta.env.VITE_API_BASE_URL) {
+    return import.meta.env.VITE_API_BASE_URL.replace(/\/+$/, '');
+  }
+
   if (typeof window !== 'undefined') {
     const { protocol, port, hostname } = window.location;
     if (protocol.startsWith('http')) {
