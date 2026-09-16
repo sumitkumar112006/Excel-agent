@@ -22,6 +22,8 @@ from openpyxl.utils import get_column_letter
 EXCEL_FILENAME = "gem_contracts.xlsx"
 JSON_FILENAME = "gem_contracts.json"
 JSONL_FILENAME = "records.jsonl"
+BATCH_EXCEL_FILENAME = "gem_contracts_batch.xlsx"
+BATCH_JSON_FILENAME = "current_batch.json"
 DEFAULT_OUTPUT_DIR = "output"
 
 # Styles
@@ -95,6 +97,30 @@ def load_existing_json(output_dir: str = DEFAULT_OUTPUT_DIR) -> List[Dict[str, A
         except Exception:
             pass
     return []
+
+
+def load_batch_json(output_dir: str = DEFAULT_OUTPUT_DIR) -> List[Dict[str, Any]]:
+    """Load records for only the current batch."""
+    batch_json_path = os.path.join(output_dir, BATCH_JSON_FILENAME)
+    if os.path.exists(batch_json_path):
+        try:
+            with open(batch_json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+        except Exception:
+            pass
+    return []
+
+
+def clear_batch_json(output_dir: str = DEFAULT_OUTPUT_DIR) -> None:
+    """Clears current batch JSON file while preserving the Master file on the server."""
+    batch_json_path = os.path.join(output_dir, BATCH_JSON_FILENAME)
+    if os.path.exists(batch_json_path):
+        try:
+            os.remove(batch_json_path)
+        except Exception:
+            pass
 
 
 import hashlib
@@ -188,6 +214,41 @@ def save_and_append_records(new_records: List[Dict[str, Any]], output_dir: str =
         "updated": update_count,
         "excel_path": os.path.abspath(saved_excel_path),
         "json_path": os.path.abspath(json_path)
+    }
+
+
+def save_batch_records(batch_records: List[Dict[str, Any]], output_dir: str = DEFAULT_OUTPUT_DIR) -> Dict[str, Any]:
+    """
+    Saves batch records for the current session:
+    1. Saves output/current_batch.json (batch data for UI display)
+    2. Generates output/gem_contracts_batch.xlsx (current batch Excel)
+    3. Appends all batch data into Server Master Excel (gem_contracts.xlsx) and Master JSON
+    """
+    ensure_output_dir(output_dir)
+
+    # 1. Save Batch JSON
+    batch_json_path = os.path.join(output_dir, BATCH_JSON_FILENAME)
+    try:
+        with open(batch_json_path, 'w', encoding='utf-8') as f:
+            json.dump(batch_records, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"Error saving batch JSON: {e}")
+
+    # 2. Save Batch Excel
+    batch_excel_path = os.path.join(output_dir, BATCH_EXCEL_FILENAME)
+    try:
+        write_styled_excel(batch_records, batch_excel_path)
+    except Exception as e:
+        print(f"Error saving batch Excel: {e}")
+
+    # 3. Append to Server-Side Master Excel & Master JSON
+    master_result = save_and_append_records(batch_records, output_dir, reprocess_all=False)
+
+    return {
+        "batch_count": len(batch_records),
+        "batch_json": batch_json_path,
+        "batch_excel": batch_excel_path,
+        "master_total": master_result.get("total_records", len(batch_records))
     }
 
 

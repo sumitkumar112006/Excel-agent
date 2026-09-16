@@ -152,8 +152,33 @@ export const api = {
     return handleResponse(res);
   },
 
-  async getRecords({ outputDir = './output', status = null, search = null, limit = 50, offset = 0 } = {}) {
-    let url = `${BASE_URL}/api/records?limit=${limit}&offset=${offset}&output_dir=${encodeURIComponent(outputDir)}`;
+  async uploadAndExtract(files, outputDir = './output') {
+    const formData = new FormData();
+    for (const file of files) {
+      formData.append('files', file);
+    }
+    const headers = {};
+    if (currentAuthToken) {
+      headers['Authorization'] = `Bearer ${currentAuthToken}`;
+    }
+    const res = await fetch(`${BASE_URL}/api/upload-and-extract?output_dir=${encodeURIComponent(outputDir)}`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
+    return handleResponse(res);
+  },
+
+  async clearBatch(outputDir = './output') {
+    const res = await fetch(`${BASE_URL}/api/clear-batch?output_dir=${encodeURIComponent(outputDir)}`, {
+      method: 'POST',
+      headers: getHeaders(),
+    });
+    return handleResponse(res);
+  },
+
+  async getRecords({ outputDir = './output', status = null, search = null, limit = 50, offset = 0, batchOnly = true } = {}) {
+    let url = `${BASE_URL}/api/records?limit=${limit}&offset=${offset}&output_dir=${encodeURIComponent(outputDir)}&batch_only=${batchOnly}`;
     if (status && status !== 'all') {
       url += `&status=${encodeURIComponent(status.toUpperCase())}`;
     }
@@ -164,6 +189,27 @@ export const api = {
       headers: getHeaders()
     });
     return handleResponse(res);
+  },
+
+  async downloadBatchExcel(outputDir = './output') {
+    const url = `${BASE_URL}/api/download/batch-excel?output_dir=${encodeURIComponent(outputDir)}`;
+    const res = await fetch(url, {
+      headers: getHeaders()
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to download batch Excel spreadsheet');
+    }
+    const blob = await res.blob();
+    const downloadUrl = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = downloadUrl;
+    link.download = `gem_batch_${new Date().toISOString().slice(0, 10)}.xlsx`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(downloadUrl);
+    return true;
   },
 
   async downloadExcel(outputDir = './output') {
@@ -179,7 +225,7 @@ export const api = {
     const downloadUrl = window.URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = downloadUrl;
-    link.download = `gem_contracts_${new Date().toISOString().slice(0, 10)}.xlsx`;
+    link.download = `gem_contracts_master_${new Date().toISOString().slice(0, 10)}.xlsx`;
     document.body.appendChild(link);
     link.click();
     link.remove();

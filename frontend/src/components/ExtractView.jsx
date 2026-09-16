@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Cpu, 
   FolderSearch, 
@@ -14,7 +14,9 @@ import {
   FolderOpen, 
   Check, 
   Sparkles,
-  ArrowRight
+  ArrowRight,
+  UploadCloud,
+  X
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { useToast } from '../context/ToastContext';
@@ -23,6 +25,7 @@ export default function ExtractView({
   config,
   api,
   onExtractionFinished,
+  onResetBatch,
   onNavigate,
 }) {
   const { addToast } = useToast();
@@ -31,6 +34,13 @@ export default function ExtractView({
   const [inputDir, setInputDir] = useState('./pdfs');
   const [outputDir, setOutputDir] = useState('./output');
   const [reprocessAll, setReprocessAll] = useState(false);
+
+  // Hidden native file/folder input references
+  const folderInputRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const [selectedFiles, setSelectedFiles] = useState([]);
+  const [selectedFolderName, setSelectedFolderName] = useState('');
+  const [isDragOver, setIsDragOver] = useState(false);
 
   // Scan state
   const [isScanning, setIsScanning] = useState(false);
@@ -60,48 +70,130 @@ export default function ExtractView({
     }
   }, [config]);
 
-  // Handle Select Folder via native OS File Explorer
-  const handleBrowseInput = async () => {
-    try {
-      addToast('Opening File Explorer to select folder...', 'info', 2000);
-      const res = await api.selectFolder(inputDir, 'Select PDF Input Folder');
-      if (res && res.status === 'selected' && res.path) {
-        setInputDir(res.path);
-        addToast(`Selected input folder: ${res.path}`, 'success');
-        // Automatically scan the selected folder
-        setIsScanning(true);
-        try {
-          const data = await api.scanFolder(res.path, outputDir.trim());
-          setScanResult(data);
-          addToast(`Detected ${data.total_pdfs} PDFs (${data.new_to_process} new)`, 'success');
-        } catch {
-          // ignore
-        } finally {
-          setIsScanning(false);
-        }
-      }
-    } catch (err) {
-      addToast(err.message || 'Could not open folder dialog', 'error');
+  // Handle native folder selection from user's computer
+  const handleFolderSelect = (e) => {
+    const rawFiles = Array.from(e.target.files || []);
+    const pdfs = rawFiles.filter(f => f.name.toLowerCase().endsWith('.pdf'));
+    if (pdfs.length === 0) {
+      addToast('No PDF files found in the selected folder.', 'warning');
+      return;
     }
+    let folderName = 'Selected Folder';
+    if (pdfs[0].webkitRelativePath) {
+      folderName = pdfs[0].webkitRelativePath.split('/')[0] || 'Selected Folder';
+    }
+    setSelectedFiles(pdfs);
+    setSelectedFolderName(folderName);
+    setInputDir(`${folderName} (${pdfs.length} PDFs)`);
+
+    // Clear previous batch from UI view
+    if (onResetBatch) onResetBatch();
+
+    setScanResult({
+      input_dir: folderName,
+      total_pdfs: pdfs.length,
+      already_processed: 0,
+      new_to_process: pdfs.length,
+      sample_files: pdfs.slice(0, 5).map(f => f.name)
+    });
+
+    addToast(`Selected folder "${folderName}" with ${pdfs.length} PDF(s)!`, 'success');
+  };
+
+  // Handle individual PDF file selection from computer
+  const handleFilesSelect = (e) => {
+    const rawFiles = Array.from(e.target.files || []);
+    const pdfs = rawFiles.filter(f => f.name.toLowerCase().endsWith('.pdf'));
+    if (pdfs.length === 0) {
+      addToast('No PDF files selected.', 'warning');
+      return;
+    }
+    setSelectedFiles(pdfs);
+    setSelectedFolderName(`${pdfs.length} Selected PDFs`);
+    setInputDir(`${pdfs.length} Selected PDFs`);
+
+    // Clear previous batch from UI view
+    if (onResetBatch) onResetBatch();
+
+    setScanResult({
+      input_dir: `${pdfs.length} PDF files`,
+      total_pdfs: pdfs.length,
+      already_processed: 0,
+      new_to_process: pdfs.length,
+      sample_files: pdfs.slice(0, 5).map(f => f.name)
+    });
+
+    addToast(`Selected ${pdfs.length} PDF file(s)!`, 'success');
+  };
+
+  // Trigger native folder picker dialog
+  const handleBrowseInput = () => {
+    if (folderInputRef.current) {
+      folderInputRef.current.value = '';
+      folderInputRef.current.click();
+    }
+  };
+
+  // Trigger native file picker dialog
+  const handleBrowseFiles = () => {
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+      fileInputRef.current.click();
+    }
+  };
+
+  // Drag & drop handler
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDragOver(false);
+    const rawFiles = Array.from(e.dataTransfer.files || []);
+    const pdfs = rawFiles.filter(f => f.name.toLowerCase().endsWith('.pdf'));
+    if (pdfs.length === 0) {
+      addToast('Please drop PDF files.', 'warning');
+      return;
+    }
+    setSelectedFiles(pdfs);
+    setSelectedFolderName(`Dropped ${pdfs.length} PDFs`);
+    setInputDir(`Dropped ${pdfs.length} PDFs`);
+
+    if (onResetBatch) onResetBatch();
+
+    setScanResult({
+      input_dir: `${pdfs.length} PDFs`,
+      total_pdfs: pdfs.length,
+      already_processed: 0,
+      new_to_process: pdfs.length,
+      sample_files: pdfs.slice(0, 5).map(f => f.name)
+    });
+
+    addToast(`Loaded ${pdfs.length} dropped PDF(s)!`, 'success');
+  };
+
+  const handleClearSelection = () => {
+    setSelectedFiles([]);
+    setSelectedFolderName('');
+    setInputDir(config?.default_input_dir || './pdfs');
+    setScanResult(null);
+    if (onResetBatch) onResetBatch();
+    addToast('Selection cleared.', 'info');
   };
 
   const handleBrowseOutput = async () => {
     try {
-      addToast('Opening File Explorer to select folder...', 'info', 2000);
-      const res = await api.selectFolder(outputDir, 'Select Destination Output Folder');
-      if (res && res.status === 'selected' && res.path) {
-        setOutputDir(res.path);
-        addToast(`Selected output folder: ${res.path}`, 'success');
-      }
-    } catch (err) {
-      addToast(err.message || 'Could not open folder dialog', 'error');
+      addToast('Output is saved to Server Master Excel & Batch Excel', 'info', 2500);
+    } catch {
+      // ignore
     }
   };
 
   // Handle Scan Folder
   const handleScan = async () => {
+    if (selectedFiles.length > 0) {
+      addToast(`${selectedFiles.length} PDFs ready in current batch.`, 'info');
+      return;
+    }
     if (!inputDir.trim()) {
-      addToast('Please specify an input folder path', 'warning');
+      addToast('Please specify an input folder path or click Select Folder', 'warning');
       return;
     }
 
@@ -120,19 +212,69 @@ export default function ExtractView({
 
   // Handle Start Extraction
   const handleStartExtraction = async () => {
-    if (!inputDir.trim()) {
-      addToast('Please enter an input directory', 'warning');
-      return;
-    }
+    if (selectedFiles.length > 0) {
+      setIsExtracting(true);
+      setProgress({
+        percentage: 5,
+        processed: 0,
+        total: selectedFiles.length,
+        current_file: selectedFiles[0].name,
+        pass_count: 0,
+        review_count: 0,
+        speed_fps: 0,
+        elapsed_seconds: 0,
+        message: `Uploading & extracting ${selectedFiles.length} files...`,
+        completed: false,
+        is_running: true,
+      });
 
-    setIsExtracting(true);
-    try {
-      await api.startExtraction(inputDir.trim(), outputDir.trim(), reprocessAll);
-      addToast('Extraction worker started in background', 'info');
       startPolling();
-    } catch (err) {
-      addToast(err.message || 'Failed to launch extraction', 'error');
-      setIsExtracting(false);
+
+      try {
+        const res = await api.uploadAndExtract(selectedFiles, outputDir.trim());
+        setIsExtracting(false);
+        setProgress(prev => ({
+          ...prev,
+          percentage: 100,
+          processed: res.batch_count || selectedFiles.length,
+          total: res.batch_count || selectedFiles.length,
+          pass_count: res.pass_count || 0,
+          review_count: res.review_count || 0,
+          completed: true,
+          is_running: false,
+          message: `Batch extraction complete! ${res.batch_count} records processed.`
+        }));
+
+        try {
+          confetti({
+            particleCount: 80,
+            spread: 70,
+            origin: { y: 0.6 },
+            colors: ['#F59E0B', '#FCD34D', '#10B981', '#EAB308', '#FFFFFF']
+          });
+        } catch {}
+
+        addToast(`Batch extraction finished: ${res.batch_count} records processed!`, 'success');
+        if (onExtractionFinished) onExtractionFinished(res.records);
+      } catch (err) {
+        addToast(err.message || 'Batch extraction failed', 'error');
+        setIsExtracting(false);
+      }
+    } else {
+      if (!inputDir.trim()) {
+        addToast('Please click Select Folder or enter an input directory', 'warning');
+        return;
+      }
+
+      setIsExtracting(true);
+      try {
+        await api.startExtraction(inputDir.trim(), outputDir.trim(), reprocessAll);
+        addToast('Extraction worker started in background', 'info');
+        startPolling();
+      } catch (err) {
+        addToast(err.message || 'Failed to launch extraction', 'error');
+        setIsExtracting(false);
+      }
     }
   };
 
@@ -201,24 +343,97 @@ export default function ExtractView({
 
       {/* Directory Settings Form Card */}
       <div className="craft-card p-6 space-y-6">
-        <h3 className="font-display text-base font-bold text-slate-900 flex items-center gap-2 border-b border-brand-border pb-3">
-          <Layers className="w-4 h-4 text-amber-600" />
-          <span>Folder Paths & Execution Options</span>
-        </h3>
+        {/* Hidden inputs for native computer File Explorer */}
+        <input
+          type="file"
+          ref={folderInputRef}
+          webkitdirectory=""
+          directory=""
+          multiple
+          onChange={handleFolderSelect}
+          style={{ display: 'none' }}
+        />
+        <input
+          type="file"
+          ref={fileInputRef}
+          accept=".pdf"
+          multiple
+          onChange={handleFilesSelect}
+          style={{ display: 'none' }}
+        />
+
+        <div className="flex items-center justify-between border-b border-brand-border pb-3">
+          <h3 className="font-display text-base font-bold text-slate-900 flex items-center gap-2">
+            <Layers className="w-4 h-4 text-amber-600" />
+            <span>Select Folder / Files from Computer</span>
+          </h3>
+          {selectedFiles.length > 0 && (
+            <button
+              type="button"
+              onClick={handleClearSelection}
+              className="text-xs font-semibold text-rose-600 hover:text-rose-700 flex items-center gap-1 hover:underline"
+            >
+              <X className="w-3.5 h-3.5" />
+              <span>Clear Selected Batch</span>
+            </button>
+          )}
+        </div>
+
+        {/* Drag & Drop Zone */}
+        <div
+          onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
+          onDragLeave={() => setIsDragOver(false)}
+          onDrop={handleDrop}
+          onClick={handleBrowseInput}
+          className={`p-6 rounded-2xl border-2 border-dashed transition-all text-center cursor-pointer ${
+            isDragOver 
+              ? 'border-amber-500 bg-amber-50/80 scale-[1.01]' 
+              : selectedFiles.length > 0
+                ? 'border-emerald-300 bg-emerald-50/40 hover:bg-emerald-50/60'
+                : 'border-brand-border bg-slate-50/60 hover:bg-amber-50/40 hover:border-amber-400'
+          }`}
+        >
+          <div className="flex flex-col items-center justify-center space-y-2">
+            <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shadow-xs transition-transform ${
+              selectedFiles.length > 0 ? 'bg-emerald-100 text-emerald-700 scale-105' : 'bg-amber-100 text-amber-600'
+            }`}>
+              {selectedFiles.length > 0 ? <CheckCircle2 className="w-6 h-6" /> : <UploadCloud className="w-6 h-6" />}
+            </div>
+            <div className="text-sm font-extrabold text-slate-800">
+              {selectedFiles.length > 0 ? (
+                <span className="text-emerald-800 font-display">
+                  {selectedFiles.length} PDF Contracts Selected ({selectedFolderName})
+                </span>
+              ) : (
+                <span>
+                  Click <span className="text-amber-600 underline">Select Folder</span> to browse your computer
+                </span>
+              )}
+            </div>
+            <div className="text-xs text-slate-500">
+              {selectedFiles.length > 0 
+                ? 'Ready for extraction. Click "Start Extraction" below to extract this batch.'
+                : 'Or drag and drop your GeM PDF folder / files directly into this area'}
+            </div>
+          </div>
+        </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
           {/* Input Folder */}
           <div className="space-y-1.5">
             <label className="text-xs font-bold text-slate-700 flex items-center justify-between">
-              <span>PDF Input Folder</span>
-              <span className="text-[10px] font-normal text-slate-400 font-mono">source directory</span>
+              <span>PDF Input Source</span>
+              <span className="text-[10px] font-normal text-slate-400 font-mono">computer file explorer</span>
             </label>
             <div className="flex items-center gap-2">
               <input
                 type="text"
                 value={inputDir}
-                onChange={(e) => setInputDir(e.target.value)}
-                placeholder="./pdfs"
+                onChange={(e) => {
+                  setInputDir(e.target.value);
+                  setSelectedFiles([]);
+                }}
+                placeholder="Select a folder from computer..."
                 className="flex-1 px-3.5 py-2.5 rounded-xl border border-brand-border bg-white text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-amber-500 transition-all shadow-sm"
               />
               <button
@@ -226,10 +441,20 @@ export default function ExtractView({
                 onClick={handleBrowseInput}
                 disabled={isScanning || isExtracting}
                 className="btn-white px-3 py-2.5 text-xs font-bold shrink-0 flex items-center gap-1.5 hover:bg-amber-50 hover:text-amber-900 border-amber-300 transition-all shadow-xs"
-                title="Open File Explorer to select PDF folder"
+                title="Open Computer File Explorer to select a folder"
               >
                 <FolderOpen className="w-4 h-4 text-amber-600" />
-                <span className="hidden sm:inline">Select Folder</span>
+                <span>Select Folder</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleBrowseFiles}
+                disabled={isScanning || isExtracting}
+                className="btn-white px-3 py-2.5 text-xs font-bold shrink-0 flex items-center gap-1.5 hover:bg-amber-50 hover:text-amber-900 border-amber-300 transition-all shadow-xs"
+                title="Select individual PDF files from computer"
+              >
+                <FileText className="w-4 h-4 text-amber-600" />
+                <span className="hidden sm:inline">Files</span>
               </button>
             </div>
           </div>
@@ -237,27 +462,14 @@ export default function ExtractView({
           {/* Output Folder */}
           <div className="space-y-1.5">
             <label className="text-xs font-bold text-slate-700 flex items-center justify-between">
-              <span>Output Folder</span>
-              <span className="text-[10px] font-normal text-slate-400 font-mono">destination directory</span>
+              <span>Extraction Output</span>
+              <span className="text-[10px] font-normal text-slate-400 font-mono">Server Master + Batch Excel</span>
             </label>
             <div className="flex items-center gap-2">
-              <input
-                type="text"
-                value={outputDir}
-                onChange={(e) => setOutputDir(e.target.value)}
-                placeholder="./output"
-                className="flex-1 px-3.5 py-2.5 rounded-xl border border-brand-border bg-white text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-amber-500 transition-all shadow-sm"
-              />
-              <button
-                type="button"
-                onClick={handleBrowseOutput}
-                disabled={isExtracting}
-                className="btn-white px-3 py-2.5 text-xs font-bold shrink-0 flex items-center gap-1.5 hover:bg-amber-50 hover:text-amber-900 border-amber-300 transition-all shadow-xs"
-                title="Open File Explorer to select output folder"
-              >
-                <FolderOpen className="w-4 h-4 text-amber-600" />
-                <span className="hidden sm:inline">Select Folder</span>
-              </button>
+              <div className="flex-1 px-3.5 py-2.5 rounded-xl border border-brand-border bg-slate-50 text-xs font-mono text-slate-700 flex items-center justify-between shadow-xs">
+                <span>output/gem_contracts_batch.xlsx</span>
+                <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-md">Server Appended</span>
+              </div>
             </div>
           </div>
         </div>

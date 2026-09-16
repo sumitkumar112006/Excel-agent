@@ -34,6 +34,8 @@ export default function RecordsView({
   onLimitChange,
   onSelectRecord,
   onDownloadExcel,
+  onDownloadMasterExcel,
+  onResetBatch,
   onDownloadJson,
   onOpenFolder,
   onRefresh,
@@ -90,22 +92,34 @@ export default function RecordsView({
           </div>
 
           {/* Quick Action Exports */}
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              onClick={onOpenFolder}
-              className="btn-white text-xs px-3 py-2"
-              title="Open Folder in File Explorer"
-            >
-              <FolderOpen className="w-3.5 h-3.5 text-amber-600" />
-              <span>Open Folder</span>
-            </button>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {records.length > 0 && onResetBatch && (
+              <button
+                onClick={onResetBatch}
+                className="btn-white text-xs px-3 py-2 text-rose-700 hover:bg-rose-50 border-rose-200"
+                title="Clear current batch records from UI view"
+              >
+                <X className="w-3.5 h-3.5" />
+                <span>Clear UI</span>
+              </button>
+            )}
+            {onDownloadMasterExcel && (
+              <button
+                onClick={onDownloadMasterExcel}
+                className="btn-white text-xs px-3 py-2"
+                title="Download Server Cumulative Master Excel Spreadsheet"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-slate-600" />
+                <span>Server Master</span>
+              </button>
+            )}
             <button
               onClick={onDownloadExcel}
               className="btn-yellow text-xs px-3.5 py-2 font-bold"
-              title="Download Master Excel Spreadsheet"
+              title="Download Current Batch Excel Spreadsheet"
             >
               <Download className="w-3.5 h-3.5" />
-              <span>Export Excel</span>
+              <span>Export Batch Excel</span>
             </button>
           </div>
 

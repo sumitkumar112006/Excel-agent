@@ -20,7 +20,7 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 # ── Third-Party ─────────────────────────────────────────────────────
-from fastapi import FastAPI, BackgroundTasks, Depends
+from fastapi import FastAPI, BackgroundTasks, Depends, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -31,10 +31,15 @@ from fastapi.staticfiles import StaticFiles
 from extractor import process_single_pdf
 from storage_manager import (
     save_and_append_records,
+    save_batch_records,
     load_existing_json,
+    load_batch_json,
+    clear_batch_json,
     ensure_output_dir,
     EXCEL_FILENAME,
     JSON_FILENAME,
+    BATCH_EXCEL_FILENAME,
+    BATCH_JSON_FILENAME,
     DEFAULT_OUTPUT_DIR,
 )
 from security import (
@@ -100,6 +105,7 @@ CURRENT_TASK = {
     "speed_fps": 0.0,
     "completed": False,
     "message": "Ready",
+    "batch_records": [],
 }
 
 
@@ -386,7 +392,8 @@ def _run_extraction(input_dir: str, output_dir: str, reprocess_all: bool, user_e
             CURRENT_TASK["speed_fps"] = round(idx / elapsed, 1)
 
         CURRENT_TASK["message"] = "Updating Excel & JSON records..."
-        save_and_append_records(batch_results, str(output_path))
+        save_batch_records(batch_results, str(output_path))
+        CURRENT_TASK["batch_records"] = batch_results
 
         # Record user extraction stats
         record_user_extraction(
@@ -450,6 +457,132 @@ async def get_progress():
     }
 
 
+@app.post("/api/upload-and-extract")
+async def upload_and_extract(
+    files: List[UploadFile] = File(...),
+    output_dir: str = "./output",
+    user: Optional[dict] = Depends(require_approved_user),
+):
+    """
+    Directly receives uploaded PDFs from the browser, extracts records,
+    maintains Server Master Excel while returning ONLY the current batch data.
+    """
+    global CURRENT_TASK
+    if CURRENT_TASK["is_running"]:
+        return JSONResponse(status_code=400, content={"error": "An extraction task is already running."})
+
+    output_path = _resolve(output_dir)
+    ensure_output_dir(str(output_path))
+
+    import uuid
+    batch_id = f"batch_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+    batch_upload_dir = ROOT_DIR / "pdfs" / batch_id
+    batch_upload_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_pdf_paths = []
+    for f in files:
+        if not f.filename or not f.filename.lower().endswith(".pdf"):
+            continue
+        dest = batch_upload_dir / Path(f.filename).name
+        with open(dest, "wb") as out_f:
+            content = await f.read()
+            out_f.write(content)
+        saved_pdf_paths.append(str(dest))
+
+    if not saved_pdf_paths:
+        return JSONResponse(status_code=400, content={"error": "No valid PDF files were uploaded."})
+
+    CURRENT_TASK.update({
+        "is_running": True,
+        "completed": False,
+        "processed_count": 0,
+        "total_count": len(saved_pdf_paths),
+        "pass_count": 0,
+        "review_count": 0,
+        "start_time": time.time(),
+        "elapsed_seconds": 0.0,
+        "speed_fps": 0.0,
+        "message": f"Extracting {len(saved_pdf_paths)} files...",
+        "batch_records": [],
+    })
+
+    batch_results = []
+    t0 = time.time()
+
+    try:
+        for idx, pdf_path in enumerate(saved_pdf_paths, start=1):
+            filename = os.path.basename(pdf_path)
+            CURRENT_TASK["current_file"] = filename
+            CURRENT_TASK["processed_count"] = idx
+
+            try:
+                record = process_single_pdf(pdf_path)
+                batch_results.append(record)
+                if record.get("validation_status") == "PASS":
+                    CURRENT_TASK["pass_count"] += 1
+                else:
+                    CURRENT_TASK["review_count"] += 1
+            except Exception as e:
+                CURRENT_TASK["review_count"] += 1
+                batch_results.append({
+                    "file_name": filename,
+                    "contract_no": "NA",
+                    "validation_status": "REVIEW",
+                    "validation_errors": [str(e)],
+                })
+
+            elapsed = max(0.001, time.time() - t0)
+            CURRENT_TASK["elapsed_seconds"] = round(elapsed, 2)
+            CURRENT_TASK["speed_fps"] = round(idx / elapsed, 1)
+
+        # Save batch records for UI and append all records into Server Master Excel
+        save_batch_records(batch_results, str(output_path))
+        CURRENT_TASK["batch_records"] = batch_results
+
+        caller_email = user.get("email") if user else "anonymous"
+        record_user_extraction(
+            email=caller_email,
+            processed_count=len(batch_results),
+            pass_count=CURRENT_TASK["pass_count"],
+            review_count=CURRENT_TASK["review_count"],
+            output_path=str(output_path)
+        )
+
+        CURRENT_TASK.update({
+            "is_running": False,
+            "completed": True,
+            "message": f"Extraction complete: {len(batch_results)} files processed.",
+        })
+
+        return {
+            "status": "success",
+            "batch_count": len(batch_results),
+            "pass_count": CURRENT_TASK["pass_count"],
+            "review_count": CURRENT_TASK["review_count"],
+            "records": batch_results,
+        }
+
+    except Exception as err:
+        CURRENT_TASK.update({
+            "is_running": False,
+            "completed": True,
+            "message": f"Upload extraction failed: {str(err)}",
+        })
+        return JSONResponse(status_code=500, content={"error": str(err)})
+    finally:
+        CURRENT_TASK["is_running"] = False
+
+
+@app.post("/api/clear-batch")
+async def clear_current_batch(output_dir: str = "./output", user: Optional[dict] = Depends(require_approved_user)):
+    """Clears current batch data from the UI while preserving Server Master Excel."""
+    global CURRENT_TASK
+    CURRENT_TASK["batch_records"] = []
+    output_path = _resolve(output_dir)
+    clear_batch_json(str(output_path))
+    return {"status": "cleared", "message": "Batch data removed from UI."}
+
+
 @app.get("/api/records")
 async def get_records(
     output_dir: str = "./output",
@@ -457,11 +590,18 @@ async def get_records(
     search: Optional[str] = None,
     limit: int = 100,
     offset: int = 0,
+    batch_only: bool = True,
     user: Optional[dict] = Depends(require_approved_user),
 ):
-    """Return extracted records with optional filtering, search, and pagination (Requires Approved User)."""
+    """Return extracted records with optional filtering, search, and pagination (Requires Approved User).
+    When batch_only=True (default for UI), displays only records from the current extraction batch."""
     output_path = _resolve(output_dir)
-    records = load_existing_json(str(output_path))
+    if batch_only:
+        records = list(CURRENT_TASK.get("batch_records") or [])
+        if not records:
+            records = load_batch_json(str(output_path))
+    else:
+        records = load_existing_json(str(output_path))
 
     # Filter by status
     if status and status.upper() in ("PASS", "REVIEW"):
@@ -482,21 +622,21 @@ async def get_records(
     total_matched = len(records)
     paginated = records[offset : offset + limit]
 
-    # Overall stats
-    all_recs = load_existing_json(str(output_path))
+    # Stats calculated strictly on current batch
     total_val = sum(
         float(r["total_order_value"])
-        for r in all_recs
+        for r in records
         if isinstance(r.get("total_order_value"), (int, float))
     )
 
     return {
         "total": total_matched,
-        "total_master": len(all_recs),
+        "total_master": total_matched,
         "total_value_inr": round(total_val, 2),
-        "pass_count": sum(1 for r in all_recs if r.get("validation_status") == "PASS"),
-        "review_count": sum(1 for r in all_recs if r.get("validation_status") == "REVIEW"),
+        "pass_count": sum(1 for r in records if r.get("validation_status") == "PASS"),
+        "review_count": sum(1 for r in records if r.get("validation_status") == "REVIEW"),
         "records": paginated,
+        "is_batch_only": batch_only,
         "caller_email": user.get("email") if user else "anonymous",
         "caller_role": user.get("role") if user else "guest",
     }
@@ -562,6 +702,26 @@ async def select_folder_dialog(req: SelectFolderRequest, user: Optional[dict] = 
     if selected:
         return {"status": "selected", "path": selected}
     return {"status": "cancelled", "path": None}
+
+
+@app.get("/api/download/batch-excel")
+async def download_batch_excel(output_dir: str = "./output", user: Optional[dict] = Depends(require_approved_user)):
+    """Download the Current Batch Excel spreadsheet (Requires Approved User)."""
+    output_path = _resolve(output_dir)
+    batch_file = output_path / BATCH_EXCEL_FILENAME
+    if not batch_file.exists():
+        # Fallback to latest excel if batch file not present
+        xlsx_files = sorted(output_path.glob("gem_contracts*.xlsx"), key=os.path.getmtime, reverse=True)
+        if xlsx_files:
+            batch_file = xlsx_files[0]
+        else:
+            return JSONResponse(status_code=404, content={"error": "Batch Excel file not found. Process PDFs first."})
+
+    return FileResponse(
+        path=str(batch_file),
+        filename=BATCH_EXCEL_FILENAME,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 @app.get("/api/download/excel")

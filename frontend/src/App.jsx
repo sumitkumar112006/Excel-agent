@@ -172,31 +172,70 @@ export default function App() {
   // Download Handlers
   const handleDownloadExcel = async () => {
     try {
-      addToast('Preparing Excel workbook...', 'info', 2000);
-      await api.downloadExcel(config.default_output_dir || './output');
-      addToast('Excel workbook downloaded successfully!', 'success');
+      addToast('Preparing batch Excel workbook...', 'info', 2000);
+      await api.downloadBatchExcel(config.default_output_dir || './output');
+      addToast('Batch Excel spreadsheet downloaded successfully!', 'success');
     } catch (err) {
-      addToast(err.message || 'Excel download failed', 'error');
+      try {
+        await api.downloadExcel(config.default_output_dir || './output');
+        addToast('Master Excel spreadsheet downloaded successfully!', 'success');
+      } catch (masterErr) {
+        addToast(err.message || 'Excel download failed', 'error');
+      }
+    }
+  };
+
+  const handleDownloadMasterExcel = async () => {
+    try {
+      addToast('Preparing Server Master Excel workbook...', 'info', 2000);
+      await api.downloadExcel(config.default_output_dir || './output');
+      addToast('Server Master Excel downloaded successfully!', 'success');
+    } catch (err) {
+      addToast(err.message || 'Master Excel download failed', 'error');
     }
   };
 
   const handleDownloadJson = async () => {
     try {
-      addToast('Preparing JSON master...', 'info', 2000);
+      addToast('Preparing JSON data...', 'info', 2000);
       await api.downloadJson(config.default_output_dir || './output');
-      addToast('JSON master file downloaded successfully!', 'success');
+      addToast('JSON file downloaded successfully!', 'success');
     } catch (err) {
       addToast(err.message || 'JSON download failed', 'error');
     }
   };
 
-  const handleOpenFolder = async () => {
+  const handleResetBatch = async () => {
     try {
-      await api.openFolder(config.default_output_dir || './output');
-      addToast('Output folder opened in Explorer', 'success');
-    } catch (err) {
-      addToast(err.message || 'Failed to open output folder', 'error');
+      await api.clearBatch();
+    } catch {
+      // ignore
     }
+    setRecords([]);
+    setRecentRecords([]);
+    setTotalMatched(0);
+    setStats({
+      totalMaster: 0,
+      totalValue: 0,
+      passCount: 0,
+      reviewCount: 0,
+    });
+    addToast('Previous batch records cleared from UI view.', 'info');
+  };
+
+  const handleOpenFolder = async () => {
+    const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+    if (isLocalhost) {
+      try {
+        await api.openFolder(config.default_output_dir || './output');
+        addToast('Output folder opened in Explorer', 'success');
+        return;
+      } catch {
+        // fallback to view records
+      }
+    }
+    setActiveView('records');
+    addToast('Viewing batch records. Use "Export Excel" to save file.', 'info', 3000);
   };
 
   if (isAuthLoading) {
@@ -314,9 +353,25 @@ export default function App() {
           <ExtractView
             config={config}
             api={api}
-            onExtractionFinished={() => {
-              loadDashboardData();
-              loadRecords();
+            onResetBatch={handleResetBatch}
+            onExtractionFinished={async (batchRecords) => {
+              if (batchRecords && batchRecords.length > 0) {
+                setRecords(batchRecords);
+                setRecentRecords(batchRecords.slice(0, 6));
+                setTotalMatched(batchRecords.length);
+                const val = batchRecords.reduce((sum, r) => sum + (typeof r.total_order_value === 'number' ? r.total_order_value : 0), 0);
+                const passes = batchRecords.filter(r => r.validation_status === 'PASS').length;
+                setStats({
+                  totalMaster: batchRecords.length,
+                  totalValue: Math.round(val * 100) / 100,
+                  passCount: passes,
+                  reviewCount: batchRecords.length - passes,
+                });
+              } else {
+                await loadDashboardData();
+                await loadRecords();
+              }
+              setActiveView('records');
             }}
             onNavigate={(view) => setActiveView(view)}
           />
@@ -349,6 +404,8 @@ export default function App() {
             }}
             onSelectRecord={(r) => setSelectedRecord(r)}
             onDownloadExcel={handleDownloadExcel}
+            onDownloadMasterExcel={handleDownloadMasterExcel}
+            onResetBatch={handleResetBatch}
             onDownloadJson={handleDownloadJson}
             onOpenFolder={handleOpenFolder}
             onRefresh={loadRecords}
