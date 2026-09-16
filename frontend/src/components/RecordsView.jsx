@@ -103,23 +103,13 @@ export default function RecordsView({
                 <span>Clear UI</span>
               </button>
             )}
-            {onDownloadMasterExcel && (
-              <button
-                onClick={onDownloadMasterExcel}
-                className="btn-white text-xs px-3 py-2"
-                title="Download Server Cumulative Master Excel Spreadsheet"
-              >
-                <FileSpreadsheet className="w-3.5 h-3.5 text-slate-600" />
-                <span>Server Master</span>
-              </button>
-            )}
             <button
               onClick={onDownloadExcel}
               className="btn-yellow text-xs px-3.5 py-2 font-bold"
-              title="Download Current Batch Excel Spreadsheet"
+              title="Download Excel Spreadsheet"
             >
               <Download className="w-3.5 h-3.5" />
-              <span>Export Batch Excel</span>
+              <span>Export Excel</span>
             </button>
           </div>
 

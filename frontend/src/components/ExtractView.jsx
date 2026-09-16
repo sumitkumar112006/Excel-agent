@@ -178,9 +178,32 @@ export default function ExtractView({
     addToast('Selection cleared.', 'info');
   };
 
+  const [outputDirHandle, setOutputDirHandle] = useState(null);
+
   const handleBrowseOutput = async () => {
+    // 1. Try modern browser File System Access API (opens native computer folder picker in Chrome/Edge)
+    if (typeof window !== 'undefined' && window.showDirectoryPicker) {
+      try {
+        const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+        if (dirHandle && dirHandle.name) {
+          setOutputDir(dirHandle.name);
+          setOutputDirHandle(dirHandle);
+          addToast(`Selected output folder: ${dirHandle.name}`, 'success');
+          return;
+        }
+      } catch (err) {
+        if (err.name === 'AbortError') return; // User cancelled
+      }
+    }
+
+    // 2. Fallback for local desktop mode
     try {
-      addToast('Output is saved to Server Master Excel & Batch Excel', 'info', 2500);
+      addToast('Opening File Explorer to select output folder...', 'info', 2000);
+      const res = await api.selectFolder(outputDir, 'Select Destination Output Folder');
+      if (res && res.status === 'selected' && res.path) {
+        setOutputDir(res.path);
+        addToast(`Selected output folder: ${res.path}`, 'success');
+      }
     } catch {
       // ignore
     }
@@ -462,14 +485,30 @@ export default function ExtractView({
           {/* Output Folder */}
           <div className="space-y-1.5">
             <label className="text-xs font-bold text-slate-700 flex items-center justify-between">
-              <span>Extraction Output</span>
-              <span className="text-[10px] font-normal text-slate-400 font-mono">Server Master + Batch Excel</span>
+              <span>Output Folder</span>
+              <span className="text-[10px] font-normal text-slate-400 font-mono">destination directory</span>
             </label>
             <div className="flex items-center gap-2">
-              <div className="flex-1 px-3.5 py-2.5 rounded-xl border border-brand-border bg-slate-50 text-xs font-mono text-slate-700 flex items-center justify-between shadow-xs">
-                <span>output/gem_contracts_batch.xlsx</span>
-                <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-md">Server Appended</span>
-              </div>
+              <input
+                type="text"
+                value={outputDir}
+                onChange={(e) => {
+                  setOutputDir(e.target.value);
+                  setOutputDirHandle(null);
+                }}
+                placeholder="./output"
+                className="flex-1 px-3.5 py-2.5 rounded-xl border border-brand-border bg-white text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-amber-500 transition-all shadow-sm"
+              />
+              <button
+                type="button"
+                onClick={handleBrowseOutput}
+                disabled={isExtracting}
+                className="btn-white px-3 py-2.5 text-xs font-bold shrink-0 flex items-center gap-1.5 hover:bg-amber-50 hover:text-amber-900 border-amber-300 transition-all shadow-xs"
+                title="Open Computer File Explorer to select output folder"
+              >
+                <FolderOpen className="w-4 h-4 text-amber-600" />
+                <span>Select Folder</span>
+              </button>
             </div>
           </div>
         </div>
@@ -672,7 +711,7 @@ export default function ExtractView({
           {progress.completed && (
             <div className="pt-3 border-t border-amber-200/60 flex items-center justify-between">
               <span className="text-xs font-semibold text-amber-950">
-                All records parsed & saved to Master datasets.
+                All records parsed and ready.
               </span>
               <button
                 onClick={() => onNavigate('records')}

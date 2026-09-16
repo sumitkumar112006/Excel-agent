@@ -72,9 +72,9 @@ export default function DashboardView({
       {/* Metrics Row */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-5">
         <StatsCard
-          title="Master Contracts"
+          title="Extracted Contracts"
           value={formatNumber(stats.totalMaster)}
-          subtext={`Saved in master database`}
+          subtext="Current batch contracts"
           icon={FileSpreadsheet}
           variant="yellow"
         />
@@ -82,7 +82,7 @@ export default function DashboardView({
         <StatsCard
           title="Total Order Value"
           value={formatCurrency(stats.totalValue)}
-          subtext="Cumulative INR order volume"
+          subtext="Batch INR order volume"
           icon={IndianRupee}
           variant="slate"
         />
@@ -207,7 +207,7 @@ export default function DashboardView({
           <div>
             <h3 className="font-display text-base font-bold text-slate-900 flex items-center gap-2">
               <FolderOpen className="w-4 h-4 text-amber-600" />
-              <span>Master Output Hub</span>
+              <span>Export & Output Hub</span>
             </h3>
             <p className="text-xs text-slate-500 font-medium mt-1">
               Direct exports and local file management
