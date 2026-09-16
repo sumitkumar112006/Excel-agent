@@ -1,0 +1,32 @@
+{
+  "global_stats": {
+    "total_pdfs_scanned": 50,
+    "total_pdfs_extracted": 0,
+    "total_scans_performed": 1,
+    "total_extractions_performed": 0,
+    "last_scan_at": "2026-09-15T09:15:02Z",
+    "last_extraction_at": null
+  },
+  "user_stats": {
+    "indonesiaka30@gmail.com": {
+      "email": "indonesiaka30@gmail.com",
+      "total_pdfs_scanned": 50,
+      "total_pdfs_extracted": 0,
+      "scans_count": 1,
+      "extractions_count": 0,
+      "last_active_at": "2026-09-15T09:15:02Z"
+    }
+  },
+  "activity_log": [
+    {
+      "id": "6cfab680",
+      "timestamp": "2026-09-15T09:15:02Z",
+      "user_email": "indonesiaka30@gmail.com",
+      "action": "scan",
+      "total_pdfs": 50,
+      "new_to_process": 5,
+      "folder": "pdfs",
+      "description": "Scanned 50 PDF(s) (5 new) in 'pdfs'"
+    }
+  ]
+}

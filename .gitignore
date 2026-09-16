@@ -1,0 +1,33 @@
+# Environments & Secrets
+.env
+.env.*
+!.env.example
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+*.log
+
+# Frontend & Build
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# App Data & Output
+pdfs/*.pdf
+output/
+output_dir/
+temp/
+scratch/
+
+# OS & Editor Files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

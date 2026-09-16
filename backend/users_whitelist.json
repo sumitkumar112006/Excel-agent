@@ -1,0 +1,22 @@
+{
+  "admin_emails": [
+    "amitk839170@gmail.com"
+  ],
+  "whitelist": [
+    {
+      "email": "indonesiaka30@gmail.com",
+      "role": "client",
+      "approved_by": "amitk839170@gmail.com",
+      "approved_at": "2026-09-15T08:55:35Z"
+    }
+  ],
+  "pending_requests": [
+    {
+      "email": "amitguptacom61@gmail.com",
+      "uid": "",
+      "name": "Amit gupta",
+      "requested_at": "2026-09-15T08:59:40Z",
+      "status": "pending"
+    }
+  ]
+}
