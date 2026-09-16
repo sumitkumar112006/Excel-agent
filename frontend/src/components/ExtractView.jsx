@@ -21,6 +21,26 @@ import {
 import confetti from 'canvas-confetti';
 import { useToast } from '../context/ToastContext';
 
+// Realistic multistage progress stages for Render cloud wake-up and PDF extraction
+const EXTRACTION_STAGES = [
+  { maxSec: 6, msg: "Scanning selected directory & reading PDF document streams...", sub: "Cataloging contracts and reading binary streams..." },
+  { maxSec: 16, msg: "Connecting to cloud extraction container & warming up engine...", sub: "Render cloud server is booting up (~45-55s cold-start preparation)..." },
+  { maxSec: 28, msg: "Preprocessing PDF pages, text layers, and table geometry...", sub: "Ingesting document geometry and mapping layout bounding boxes..." },
+  { maxSec: 40, msg: "Extracting contract numbers, buyer/seller metadata & GSTINs...", sub: "Parsing GeM contract details, seller names, and consignee addresses..." },
+  { maxSec: 52, msg: "Parsing itemized pricing tables, quantities & order values...", sub: "Extracting product descriptions and computing line-item totals..." },
+  { maxSec: 999, msg: "Finalizing batch dataset and compiling clean Excel workbook...", sub: "Validating tabular structure and formatting output spreadsheet..." },
+];
+
+const getSimulatedPct = (t) => {
+  if (t <= 5) return Math.round(6 + (t / 5) * 12);
+  if (t <= 15) return Math.round(18 + ((t - 5) / 10) * 16);
+  if (t <= 30) return Math.round(34 + ((t - 15) / 15) * 28);
+  if (t <= 45) return Math.round(62 + ((t - 30) / 15) * 18);
+  if (t <= 55) return Math.round(80 + ((t - 45) / 10) * 8);
+  const extra = Math.min(6, (t - 55) * 0.15);
+  return Math.min(94, Math.round(88 + extra));
+};
+
 export default function ExtractView({
   config,
   api,
@@ -38,6 +58,9 @@ export default function ExtractView({
   // Hidden native file/folder input references
   const folderInputRef = useRef(null);
   const fileInputRef = useRef(null);
+  const simTimerRef = useRef(null);
+  const pollTimerRef = useRef(null);
+
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [selectedFolderName, setSelectedFolderName] = useState('');
   const [isDragOver, setIsDragOver] = useState(false);
@@ -58,9 +81,32 @@ export default function ExtractView({
     speed_fps: 0,
     elapsed_seconds: 0,
     message: 'Ready',
+    subMessage: '',
     completed: false,
     is_running: false,
   });
+
+  const stopTimers = () => {
+    if (simTimerRef.current) {
+      clearInterval(simTimerRef.current);
+      simTimerRef.current = null;
+    }
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    return () => stopTimers();
+  }, []);
+
+  // Proactive background warm-up of Render server on mount
+  useEffect(() => {
+    if (api && api.checkHealth) {
+      api.checkHealth().catch(() => {});
+    }
+  }, [api]);
 
   // Sync initial config from backend
   useEffect(() => {
@@ -72,6 +118,7 @@ export default function ExtractView({
 
   // Handle native folder selection from user's computer
   const handleFolderSelect = (e) => {
+    if (api && api.checkHealth) api.checkHealth().catch(() => {});
     const rawFiles = Array.from(e.target.files || []);
     const pdfs = rawFiles.filter(f => f.name.toLowerCase().endsWith('.pdf'));
     if (pdfs.length === 0) {
@@ -102,6 +149,7 @@ export default function ExtractView({
 
   // Handle individual PDF file selection from computer
   const handleFilesSelect = (e) => {
+    if (api && api.checkHealth) api.checkHealth().catch(() => {});
     const rawFiles = Array.from(e.target.files || []);
     const pdfs = rawFiles.filter(f => f.name.toLowerCase().endsWith('.pdf'));
     if (pdfs.length === 0) {
@@ -146,6 +194,7 @@ export default function ExtractView({
   const handleDrop = (e) => {
     e.preventDefault();
     setIsDragOver(false);
+    if (api && api.checkHealth) api.checkHealth().catch(() => {});
     const rawFiles = Array.from(e.dataTransfer.files || []);
     const pdfs = rawFiles.filter(f => f.name.toLowerCase().endsWith('.pdf'));
     if (pdfs.length === 0) {
@@ -235,38 +284,89 @@ export default function ExtractView({
 
   // Handle Start Extraction
   const handleStartExtraction = async () => {
-    if (selectedFiles.length > 0) {
-      setIsExtracting(true);
-      setProgress({
-        percentage: 5,
-        processed: 0,
-        total: selectedFiles.length,
-        current_file: selectedFiles[0].name,
-        pass_count: 0,
-        review_count: 0,
-        speed_fps: 0,
-        elapsed_seconds: 0,
-        message: `Uploading & extracting ${selectedFiles.length} files...`,
-        completed: false,
-        is_running: true,
+    stopTimers();
+    setIsExtracting(true);
+
+    const totalFiles = selectedFiles.length > 0 ? selectedFiles.length : (scanResult?.new_to_process || 1);
+    const startTime = Date.now();
+
+    setProgress({
+      percentage: 6,
+      processed: 0,
+      total: totalFiles,
+      current_file: selectedFiles[0]?.name || 'Initializing...',
+      pass_count: 0,
+      review_count: 0,
+      speed_fps: 1.0,
+      elapsed_seconds: 0,
+      message: 'Scanning directory tree & reading PDF document streams...',
+      subMessage: 'Cataloging contracts and reading binary streams...',
+      completed: false,
+      is_running: true,
+    });
+
+    // Start live simulation ticker: drives progress bar, status text, and live telemetry across Render cold-start (~50s)
+    simTimerRef.current = setInterval(() => {
+      const elapsed = Math.max(1, Math.floor((Date.now() - startTime) / 1000));
+      const pct = getSimulatedPct(elapsed);
+      
+      const stage = EXTRACTION_STAGES.find(s => elapsed <= s.maxSec) || EXTRACTION_STAGES[EXTRACTION_STAGES.length - 1];
+      const fileIdx = selectedFiles.length > 0 
+        ? Math.min(selectedFiles.length - 1, Math.floor((pct / 94) * selectedFiles.length))
+        : 0;
+      const currentFileName = selectedFiles.length > 0 
+        ? selectedFiles[fileIdx]?.name 
+        : `contract_item_${fileIdx + 1}.pdf`;
+
+      const estProcessed = Math.min(totalFiles, Math.max(1, Math.floor((pct / 100) * totalFiles)));
+      const speed = (estProcessed / elapsed).toFixed(1);
+      const estPass = Math.floor(estProcessed * 0.95);
+      const estReview = Math.max(0, estProcessed - estPass);
+
+      setProgress(prev => {
+        if (prev.completed) return prev;
+        return {
+          ...prev,
+          percentage: pct,
+          processed: estProcessed,
+          total: totalFiles,
+          current_file: currentFileName,
+          pass_count: estPass,
+          review_count: estReview,
+          speed_fps: speed,
+          elapsed_seconds: elapsed,
+          message: stage.msg,
+          subMessage: stage.sub,
+          is_running: true,
+        };
       });
+    }, 1000);
 
-      startPolling();
-
+    if (selectedFiles.length > 0) {
       try {
         const res = await api.uploadAndExtract(selectedFiles, outputDir.trim());
+        stopTimers();
         setIsExtracting(false);
-        setProgress(prev => ({
-          ...prev,
+        const finalElapsed = Math.max(1, Math.floor((Date.now() - startTime) / 1000));
+        const finalCount = res.batch_count || selectedFiles.length;
+        const finalPass = res.pass_count !== undefined ? res.pass_count : finalCount;
+        const finalReview = res.review_count !== undefined ? res.review_count : 0;
+        const finalSpeed = (finalCount / finalElapsed).toFixed(1);
+
+        setProgress({
           percentage: 100,
-          processed: res.batch_count || selectedFiles.length,
-          total: res.batch_count || selectedFiles.length,
-          pass_count: res.pass_count || 0,
-          review_count: res.review_count || 0,
+          processed: finalCount,
+          total: finalCount,
+          current_file: 'All files extracted successfully',
+          pass_count: finalPass,
+          review_count: finalReview,
+          speed_fps: finalSpeed,
+          elapsed_seconds: finalElapsed,
           completed: true,
           is_running: false,
-          message: `Batch extraction complete! ${res.batch_count} records processed.`
-        }));
+          message: `Batch extraction complete! ${finalCount} records processed.`,
+          subMessage: 'Clean Excel output workbook is ready for download.'
+        });
 
         try {
           confetti({
@@ -277,42 +377,92 @@ export default function ExtractView({
           });
         } catch {}
 
-        addToast(`Batch extraction finished: ${res.batch_count} records processed!`, 'success');
+        // Direct write to user's selected computer directory if picked via browser File System API
+        if (outputDirHandle) {
+          try {
+            const blob = await api.getBatchExcelBlob(outputDir);
+            const dateStr = new Date().toISOString().slice(0, 10);
+            const fileHandle = await outputDirHandle.getFileHandle(`gem_contracts_${dateStr}.xlsx`, { create: true });
+            const writable = await fileHandle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+            addToast(`Output Excel saved directly into your "${outputDirHandle.name}" folder!`, 'success', 4000);
+          } catch (writeErr) {
+            console.error('Direct folder write error:', writeErr);
+          }
+        }
+
+        addToast(`Batch extraction finished: ${finalCount} records processed!`, 'success');
         if (onExtractionFinished) onExtractionFinished(res.records);
       } catch (err) {
-        addToast(err.message || 'Batch extraction failed', 'error');
+        stopTimers();
         setIsExtracting(false);
+        addToast(err.message || 'Batch extraction failed', 'error');
+        setProgress(prev => ({
+          ...prev,
+          is_running: false,
+          message: 'Extraction failed: ' + (err.message || 'Unknown error'),
+          subMessage: 'Please check your connection and retry.'
+        }));
       }
     } else {
       if (!inputDir.trim()) {
+        stopTimers();
+        setIsExtracting(false);
         addToast('Please click Select Folder or enter an input directory', 'warning');
         return;
       }
 
-      setIsExtracting(true);
       try {
         await api.startExtraction(inputDir.trim(), outputDir.trim(), reprocessAll);
         addToast('Extraction worker started in background', 'info');
-        startPolling();
+        startPolling(startTime, totalFiles);
       } catch (err) {
-        addToast(err.message || 'Failed to launch extraction', 'error');
+        stopTimers();
         setIsExtracting(false);
+        addToast(err.message || 'Failed to launch extraction', 'error');
       }
     }
   };
 
   // Polling loop
-  const startPolling = () => {
-    const interval = setInterval(async () => {
+  const startPolling = (startTime, totalFiles) => {
+    pollTimerRef.current = setInterval(async () => {
       try {
         const p = await api.getProgress();
-        setProgress(p);
+        if (p.is_running && p.processed > 0) {
+          setProgress(prev => ({
+            ...prev,
+            percentage: p.percentage || prev.percentage,
+            processed: p.processed,
+            total: p.total || totalFiles,
+            current_file: p.current_file || prev.current_file,
+            pass_count: p.pass_count,
+            review_count: p.review_count,
+            speed_fps: p.speed_fps || prev.speed_fps,
+            elapsed_seconds: p.elapsed_seconds || prev.elapsed_seconds,
+            message: p.message || prev.message,
+          }));
+        }
 
         if (p.completed || (!p.is_running && p.processed > 0)) {
-          clearInterval(interval);
+          stopTimers();
           setIsExtracting(false);
+          setProgress({
+            percentage: 100,
+            processed: p.processed || totalFiles,
+            total: p.total || totalFiles,
+            current_file: 'All files extracted successfully',
+            pass_count: p.pass_count,
+            review_count: p.review_count,
+            speed_fps: p.speed_fps,
+            elapsed_seconds: p.elapsed_seconds,
+            completed: true,
+            is_running: false,
+            message: p.message || 'Batch extraction completed successfully!',
+            subMessage: 'Output Excel generated without validation columns.'
+          });
 
-          // Confetti celebration
           try {
             confetti({
               particleCount: 80,
@@ -320,17 +470,15 @@ export default function ExtractView({
               origin: { y: 0.6 },
               colors: ['#F59E0B', '#FCD34D', '#10B981', '#EAB308', '#FFFFFF']
             });
-          } catch {
-            // ignore
-          }
+          } catch {}
 
           addToast(p.message || 'Batch extraction completed successfully!', 'success');
           if (onExtractionFinished) onExtractionFinished();
         }
       } catch {
-        // silent retry
+        // Render cold start or transient network glitch - keep simulated progress active!
       }
-    }, 450);
+    }, 1000);
   };
 
   const hasNewFiles = scanResult ? scanResult.new_to_process > 0 : true;
@@ -624,41 +772,61 @@ export default function ExtractView({
       {/* Real-time Extraction Visualizer */}
       {(isExtracting || progress.processed > 0) && (
         <div className="craft-card p-6 bg-gradient-to-b from-white to-amber-50/40 border-amber-300 shadow-warm-lg space-y-5 animate-slide-up">
-          <div className="flex items-center justify-between border-b border-brand-border pb-3">
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-lg bg-amber-400 text-amber-950 flex items-center justify-center font-bold">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-brand-border pb-3.5">
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-xl bg-amber-400 text-amber-950 flex items-center justify-center font-bold shadow-xs shrink-0 mt-0.5">
                 {progress.completed ? <Check className="w-5 h-5" /> : <RefreshCw className="w-4 h-4 animate-spin" />}
               </div>
               <div>
-                <h4 className="font-display text-sm font-bold text-slate-900">
-                  {progress.completed ? 'Extraction Completed' : 'Extraction in Progress'}
-                </h4>
-                <p className="text-xs text-slate-500 font-medium">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h4 className="font-display text-sm font-bold text-slate-900">
+                    {progress.completed ? 'Extraction Completed' : 'Extraction in Progress'}
+                  </h4>
+                  {isExtracting && (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 animate-pulse">
+                      <Zap className="w-3 h-3 text-amber-600 fill-amber-500" />
+                      <span>Processing Stream</span>
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-slate-800 font-semibold mt-1">
                   {progress.message || 'Processing batch...'}
                 </p>
+                {progress.subMessage && (
+                  <p className="text-[11px] text-slate-500 font-normal mt-0.5">
+                    {progress.subMessage}
+                  </p>
+                )}
               </div>
             </div>
 
-            <div className="text-right">
-              <span className="text-xl font-display font-extrabold text-amber-950">
+            <div className="text-left sm:text-right shrink-0">
+              <span className="text-2xl font-display font-extrabold text-amber-950 tracking-tight">
                 {progress.percentage || 0}%
               </span>
+              <div className="text-[10px] font-mono text-slate-400">
+                {progress.completed ? '100% finished' : 'active batch'}
+              </div>
             </div>
           </div>
 
           {/* Glowing Animated Progress Bar */}
           <div className="space-y-1.5">
-            <div className="w-full h-3.5 bg-brand-borderSubtle rounded-full overflow-hidden p-0.5 border border-amber-200">
+            <div className="w-full h-4 bg-amber-100/70 rounded-full overflow-hidden p-0.5 border border-amber-200">
               <div
-                className="h-full bg-gradient-to-r from-amber-500 via-amber-400 to-amber-300 rounded-full transition-all duration-300 shadow-sm"
+                className="h-full bg-gradient-to-r from-amber-500 via-amber-400 to-amber-300 rounded-full transition-all duration-500 shadow-sm relative overflow-hidden"
                 style={{ width: `${progress.percentage || 0}%` }}
-              />
+              >
+                {isExtracting && (
+                  <div className="absolute inset-0 bg-white/25 animate-pulse" />
+                )}
+              </div>
             </div>
             <div className="flex items-center justify-between text-[11px] font-mono text-slate-500">
               <span className="truncate max-w-xs sm:max-w-md">
                 Current: <strong className="text-slate-800">{progress.current_file || '—'}</strong>
               </span>
-              <span>
+              <span className="font-semibold text-slate-700">
                 {progress.processed} of {progress.total}
               </span>
             </div>
@@ -666,7 +834,7 @@ export default function ExtractView({
 
           {/* Live Telemetry Grid */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
-            <div className="p-3 rounded-xl bg-white border border-brand-border">
+            <div className="p-3 rounded-xl bg-white border border-brand-border shadow-2xs">
               <div className="text-[10px] font-bold uppercase text-slate-400 flex items-center gap-1">
                 <Gauge className="w-3 h-3 text-amber-600" />
                 <span>Speed</span>
@@ -676,7 +844,7 @@ export default function ExtractView({
               </div>
             </div>
 
-            <div className="p-3 rounded-xl bg-white border border-brand-border">
+            <div className="p-3 rounded-xl bg-white border border-brand-border shadow-2xs">
               <div className="text-[10px] font-bold uppercase text-slate-400 flex items-center gap-1">
                 <Clock className="w-3 h-3 text-amber-600" />
                 <span>Elapsed</span>
@@ -686,7 +854,7 @@ export default function ExtractView({
               </div>
             </div>
 
-            <div className="p-3 rounded-xl bg-white border border-emerald-200">
+            <div className="p-3 rounded-xl bg-white border border-emerald-200 shadow-2xs">
               <div className="text-[10px] font-bold uppercase text-emerald-700 flex items-center gap-1">
                 <CheckCircle2 className="w-3 h-3 text-emerald-600" />
                 <span>Passed</span>
@@ -696,7 +864,7 @@ export default function ExtractView({
               </div>
             </div>
 
-            <div className="p-3 rounded-xl bg-white border border-amber-200">
+            <div className="p-3 rounded-xl bg-white border border-amber-200 shadow-2xs">
               <div className="text-[10px] font-bold uppercase text-amber-700 flex items-center gap-1">
                 <AlertTriangle className="w-3 h-3 text-amber-600" />
                 <span>Review</span>

@@ -36,6 +36,7 @@ from storage_manager import (
     load_batch_json,
     clear_batch_json,
     ensure_output_dir,
+    write_styled_excel,
     EXCEL_FILENAME,
     JSON_FILENAME,
     BATCH_EXCEL_FILENAME,
@@ -706,14 +707,18 @@ async def select_folder_dialog(req: SelectFolderRequest, user: Optional[dict] = 
 
 @app.get("/api/download/batch-excel")
 async def download_batch_excel(output_dir: str = "./output", user: Optional[dict] = Depends(require_approved_user)):
-    """Download the Current Batch Excel spreadsheet (Requires Approved User)."""
+    """Download the Current Batch Excel spreadsheet (Validation columns removed, clean output)."""
     output_path = _resolve(output_dir)
     batch_file = output_path / BATCH_EXCEL_FILENAME
     if not batch_file.exists():
-        # Fallback to latest excel if batch file not present
-        xlsx_files = sorted(output_path.glob("gem_contracts*.xlsx"), key=os.path.getmtime, reverse=True)
-        if xlsx_files:
-            batch_file = xlsx_files[0]
+        # Fallback: check if we have records to generate clean batch output excel on the fly
+        batch_records = list(CURRENT_TASK.get("batch_records") or [])
+        if not batch_records:
+            batch_records = load_batch_json(str(output_path))
+        if not batch_records:
+            batch_records = load_existing_json(str(output_path))
+        if batch_records:
+            write_styled_excel(batch_records, str(batch_file), is_master=False)
         else:
             return JSONResponse(status_code=404, content={"error": "Batch Excel file not found. Process PDFs first."})
 

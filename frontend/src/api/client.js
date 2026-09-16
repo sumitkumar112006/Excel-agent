@@ -191,7 +191,7 @@ export const api = {
     return handleResponse(res);
   },
 
-  async downloadBatchExcel(outputDir = './output') {
+  async getBatchExcelBlob(outputDir = './output') {
     const url = `${BASE_URL}/api/download/batch-excel?output_dir=${encodeURIComponent(outputDir)}`;
     const res = await fetch(url, {
       headers: getHeaders()
@@ -200,16 +200,20 @@ export const api = {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || 'Failed to download batch Excel spreadsheet');
     }
-    const blob = await res.blob();
+    return await res.blob();
+  },
+
+  async downloadBatchExcel(outputDir = './output') {
+    const blob = await this.getBatchExcelBlob(outputDir);
     const downloadUrl = window.URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = downloadUrl;
-    link.download = `gem_batch_${new Date().toISOString().slice(0, 10)}.xlsx`;
+    link.download = `gem_contracts_${new Date().toISOString().slice(0, 10)}.xlsx`;
     document.body.appendChild(link);
     link.click();
     link.remove();
     window.URL.revokeObjectURL(downloadUrl);
-    return true;
+    return blob;
   },
 
   async downloadExcel(outputDir = './output') {

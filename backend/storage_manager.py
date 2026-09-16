@@ -53,8 +53,8 @@ THIN_BORDER = Border(
 )
 
 
-# Ordered columns matching specification
-COLUMNS = [
+# 1. Server Master Columns (Retains Validation Status and Validation Score for internal audit)
+MASTER_COLUMNS = [
     ("S.No", "s_no", 8),
     ("Validation Status", "validation_status", 16),
     ("Validation Score (%)", "validation_score", 18),
@@ -77,6 +77,32 @@ COLUMNS = [
     ("Total Order Value (INR)", "total_order_value", 24),
     ("File Name", "file_name", 35),
 ]
+
+# 2. User Output Columns (Validation Status and Validation Score removed as requested)
+USER_OUTPUT_COLUMNS = [
+    ("S.No", "s_no", 8),
+    ("Contract No", "contract_no", 28),
+    ("Generated Date", "generated_date", 16),
+    ("Seller Company Name", "seller_company_name", 30),
+    ("Seller Contact No", "seller_contact_no", 18),
+    ("Seller Email", "seller_email", 30),
+    ("Seller GSTIN", "seller_gstin", 20),
+    ("Consignee Address", "consignee_address", 40),
+    ("Consignee Contact No", "consignee_contact_no", 20),
+    ("Consignee Email", "consignee_email", 30),
+    ("Buyer Email", "buyer_email", 30),
+    ("Paying Authority Email", "paying_authority_email", 30),
+    ("Product Name", "product_name", 35),
+    ("Brand", "brand", 22),
+    ("Category & Quadrant", "category_name_quadrant", 35),
+    ("Ordered Quantity", "ordered_quantity", 18),
+    ("Unit Price (INR)", "unit_price", 18),
+    ("Total Order Value (INR)", "total_order_value", 24),
+    ("File Name", "file_name", 35),
+]
+
+# Compatibility alias
+COLUMNS = MASTER_COLUMNS
 
 
 def ensure_output_dir(output_dir: str = DEFAULT_OUTPUT_DIR) -> str:
@@ -204,9 +230,9 @@ def save_and_append_records(new_records: List[Dict[str, Any]], output_dir: str =
     except Exception as e:
         print(f"Error saving JSONL: {e}")
 
-    # 3. Save Formatted Excel (with lock protection)
+    # 3. Save Formatted Master Excel (with lock protection and audit validation columns)
     excel_path = os.path.join(output_dir, EXCEL_FILENAME)
-    saved_excel_path = write_styled_excel(all_records, excel_path)
+    saved_excel_path = write_styled_excel(all_records, excel_path, is_master=True)
 
     return {
         "total_records": len(all_records),
@@ -221,8 +247,8 @@ def save_batch_records(batch_records: List[Dict[str, Any]], output_dir: str = DE
     """
     Saves batch records for the current session:
     1. Saves output/current_batch.json (batch data for UI display)
-    2. Generates output/gem_contracts_batch.xlsx (current batch Excel)
-    3. Appends all batch data into Server Master Excel (gem_contracts.xlsx) and Master JSON
+    2. Generates output/gem_contracts_batch.xlsx (clean user output Excel without validation status/score)
+    3. Appends all batch data into Server Master Excel (gem_contracts.xlsx, retaining validation columns)
     """
     ensure_output_dir(output_dir)
 
@@ -234,14 +260,14 @@ def save_batch_records(batch_records: List[Dict[str, Any]], output_dir: str = DE
     except Exception as e:
         print(f"Error saving batch JSON: {e}")
 
-    # 2. Save Batch Excel
+    # 2. Save User Output Batch Excel (validation columns removed)
     batch_excel_path = os.path.join(output_dir, BATCH_EXCEL_FILENAME)
     try:
-        write_styled_excel(batch_records, batch_excel_path)
+        write_styled_excel(batch_records, batch_excel_path, is_master=False)
     except Exception as e:
         print(f"Error saving batch Excel: {e}")
 
-    # 3. Append to Server-Side Master Excel & Master JSON
+    # 3. Append to Server-Side Master Excel & Master JSON (validation columns preserved)
     master_result = save_and_append_records(batch_records, output_dir, reprocess_all=False)
 
     return {
@@ -252,15 +278,21 @@ def save_batch_records(batch_records: List[Dict[str, Any]], output_dir: str = DE
     }
 
 
-def write_styled_excel(records: List[Dict[str, Any]], excel_path: str) -> str:
-    """Generates an aesthetic, professionally styled Excel file with file lock handling."""
+def write_styled_excel(records: List[Dict[str, Any]], excel_path: str, is_master: bool = False) -> str:
+    """
+    Generates an aesthetic, professionally styled Excel file with file lock handling.
+    - If is_master=True: includes Validation Status and Validation Score (%) for server master audit.
+    - If is_master=False: excludes validation columns for clean client-facing output.
+    """
     wb = Workbook()
     ws = wb.active
-    ws.title = "GeM_Contracts_Master"
+    ws.title = "GeM_Contracts_Master" if is_master else "GeM_Contracts"
+
+    columns = MASTER_COLUMNS if is_master else USER_OUTPUT_COLUMNS
 
     ws.row_dimensions[1].height = 28
 
-    for col_idx, (col_title, _, width) in enumerate(COLUMNS, start=1):
+    for col_idx, (col_title, _, width) in enumerate(columns, start=1):
         cell = ws.cell(row=1, column=col_idx, value=col_title)
         cell.fill = HEADER_FILL
         cell.font = HEADER_FONT
@@ -274,7 +306,7 @@ def write_styled_excel(records: List[Dict[str, Any]], excel_path: str) -> str:
         is_even = (row_idx % 2 == 0)
         base_fill = EVEN_FILL if is_even else ODD_FILL
 
-        for col_idx, (_, field_key, _) in enumerate(COLUMNS, start=1):
+        for col_idx, (_, field_key, _) in enumerate(columns, start=1):
             if field_key == "s_no":
                 val = row_idx - 1
             elif field_key == "validation_errors_str":
@@ -310,7 +342,7 @@ def write_styled_excel(records: List[Dict[str, Any]], excel_path: str) -> str:
                 cell.alignment = CELL_ALIGN_LEFT
 
     if records:
-        last_col = get_column_letter(len(COLUMNS))
+        last_col = get_column_letter(len(columns))
         ws.auto_filter.ref = f"A1:{last_col}{len(records) + 1}"
 
     ws.freeze_panes = "A2"
