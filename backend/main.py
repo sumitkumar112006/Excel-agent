@@ -306,25 +306,23 @@ async def scan_folder(req: ScanRequest, user: Optional[dict] = Depends(require_a
         return JSONResponse(status_code=400, content={"error": f"Input folder not found: {input_path}"})
 
     pdf_files = find_pdf_files(input_path)
-    existing_records = load_existing_json(str(output_path))
-    processed_filenames = {r.get("file_name") for r in existing_records}
-    unprocessed = [f for f in pdf_files if os.path.basename(f) not in processed_filenames]
+    total_count = len(pdf_files)
 
     caller_email = user.get("email") if user else "anonymous"
     # Record scan in persistent stats
     record_user_scan(
         email=caller_email,
-        total_scanned=len(pdf_files),
-        new_count=len(unprocessed),
+        total_scanned=total_count,
+        new_count=total_count,
         input_path=str(input_path)
     )
 
     return {
         "input_dir": str(input_path),
         "output_dir": str(output_path),
-        "total_pdfs": len(pdf_files),
-        "already_processed": len(pdf_files) - len(unprocessed),
-        "new_to_process": len(unprocessed),
+        "total_pdfs": total_count,
+        "already_processed": 0,
+        "new_to_process": total_count,
         "sample_files": [os.path.basename(f) for f in pdf_files[:5]],
         "caller_email": caller_email,
         "caller_role": user.get("role") if user else "guest",
@@ -343,6 +341,7 @@ def _run_extraction(input_dir: str, output_dir: str, reprocess_all: bool, user_e
         "review_count": 0,
         "start_time": time.time(),
         "message": "Starting extraction...",
+        "batch_records": [],
     })
 
     try:
@@ -351,17 +350,12 @@ def _run_extraction(input_dir: str, output_dir: str, reprocess_all: bool, user_e
         ensure_output_dir(str(output_path))
 
         pdf_files = find_pdf_files(input_path)
-        existing_records = load_existing_json(str(output_path))
-        processed_filenames = {r.get("file_name") for r in existing_records}
-
-        files_to_run = pdf_files if reprocess_all else [
-            f for f in pdf_files if os.path.basename(f) not in processed_filenames
-        ]
+        files_to_run = pdf_files
 
         CURRENT_TASK["total_count"] = len(files_to_run)
 
         if not files_to_run:
-            CURRENT_TASK.update({"is_running": False, "completed": True, "message": "All files are already processed."})
+            CURRENT_TASK.update({"is_running": False, "completed": True, "message": "No PDF files found in folder."})
             return
 
         batch_results = []
@@ -373,12 +367,20 @@ def _run_extraction(input_dir: str, output_dir: str, reprocess_all: bool, user_e
             CURRENT_TASK["processed_count"] = idx
 
             try:
-                record = process_single_pdf(pdf_file)
-                batch_results.append(record)
-                if record.get("validation_status") == "PASS":
-                    CURRENT_TASK["pass_count"] += 1
+                records = process_single_pdf(pdf_file)
+                if isinstance(records, list):
+                    batch_results.extend(records)
+                    for r in records:
+                        if r.get("validation_status") == "PASS":
+                            CURRENT_TASK["pass_count"] += 1
+                        else:
+                            CURRENT_TASK["review_count"] += 1
                 else:
-                    CURRENT_TASK["review_count"] += 1
+                    batch_results.append(records)
+                    if records.get("validation_status") == "PASS":
+                        CURRENT_TASK["pass_count"] += 1
+                    else:
+                        CURRENT_TASK["review_count"] += 1
             except Exception as e:
                 CURRENT_TASK["review_count"] += 1
                 batch_results.append({
@@ -517,12 +519,20 @@ async def upload_and_extract(
             CURRENT_TASK["processed_count"] = idx
 
             try:
-                record = process_single_pdf(pdf_path)
-                batch_results.append(record)
-                if record.get("validation_status") == "PASS":
-                    CURRENT_TASK["pass_count"] += 1
+                records = process_single_pdf(pdf_path)
+                if isinstance(records, list):
+                    batch_results.extend(records)
+                    for r in records:
+                        if r.get("validation_status") == "PASS":
+                            CURRENT_TASK["pass_count"] += 1
+                        else:
+                            CURRENT_TASK["review_count"] += 1
                 else:
-                    CURRENT_TASK["review_count"] += 1
+                    batch_results.append(records)
+                    if records.get("validation_status") == "PASS":
+                        CURRENT_TASK["pass_count"] += 1
+                    else:
+                        CURRENT_TASK["review_count"] += 1
             except Exception as e:
                 CURRENT_TASK["review_count"] += 1
                 batch_results.append({
@@ -576,12 +586,24 @@ async def upload_and_extract(
 
 @app.post("/api/clear-batch")
 async def clear_current_batch(output_dir: str = "./output", user: Optional[dict] = Depends(require_approved_user)):
-    """Clears current batch data from the UI while preserving Server Master Excel."""
+    """Clears current batch data from the UI and output store."""
     global CURRENT_TASK
-    CURRENT_TASK["batch_records"] = []
+    CURRENT_TASK.update({
+        "is_running": False,
+        "completed": False,
+        "processed_count": 0,
+        "total_count": 0,
+        "pass_count": 0,
+        "review_count": 0,
+        "current_file": "",
+        "speed_fps": 0.0,
+        "elapsed_seconds": 0.0,
+        "message": "Ready",
+        "batch_records": [],
+    })
     output_path = _resolve(output_dir)
     clear_batch_json(str(output_path))
-    return {"status": "cleared", "message": "Batch data removed from UI."}
+    return {"status": "cleared", "message": "Batch data removed from UI and storage."}
 
 
 @app.get("/api/records")
@@ -708,16 +730,38 @@ async def select_folder_dialog(req: SelectFolderRequest, user: Optional[dict] = 
 @app.get("/api/download/batch-excel")
 async def download_batch_excel(output_dir: str = "./output", user: Optional[dict] = Depends(require_approved_user)):
     """Download the Current Batch Excel spreadsheet (Validation columns removed, clean output)."""
-    output_path = _resolve(output_dir)
-    batch_file = output_path / BATCH_EXCEL_FILENAME
-    if not batch_file.exists():
+    candidates = []
+    try:
+        candidates.append(_resolve(output_dir))
+    except Exception:
+        pass
+    candidates.append(DEFAULT_OUTPUT_PATH)
+    candidates.append(ROOT_DIR / "output")
+
+    batch_file = None
+    for cand in candidates:
+        bf = cand / BATCH_EXCEL_FILENAME
+        if bf.exists():
+            batch_file = bf
+            break
+
+    if not batch_file:
         # Fallback: check if we have records to generate clean batch output excel on the fly
         batch_records = list(CURRENT_TASK.get("batch_records") or [])
         if not batch_records:
-            batch_records = load_batch_json(str(output_path))
+            for cand in candidates:
+                batch_records = load_batch_json(str(cand))
+                if batch_records:
+                    break
         if not batch_records:
-            batch_records = load_existing_json(str(output_path))
+            for cand in candidates:
+                batch_records = load_existing_json(str(cand))
+                if batch_records:
+                    break
         if batch_records:
+            target_dir = candidates[0] if candidates else DEFAULT_OUTPUT_PATH
+            ensure_output_dir(str(target_dir))
+            batch_file = target_dir / BATCH_EXCEL_FILENAME
             write_styled_excel(batch_records, str(batch_file), is_master=False)
         else:
             return JSONResponse(status_code=404, content={"error": "Batch Excel file not found. Process PDFs first."})
@@ -726,22 +770,44 @@ async def download_batch_excel(output_dir: str = "./output", user: Optional[dict
         path=str(batch_file),
         filename=BATCH_EXCEL_FILENAME,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{BATCH_EXCEL_FILENAME}"'}
     )
 
 
 @app.get("/api/download/excel")
 async def download_excel(output_dir: str = "./output", user: Optional[dict] = Depends(require_approved_user)):
     """Download the latest Master Excel file (Requires Approved User)."""
-    output_path = _resolve(output_dir)
-    xlsx_files = sorted(output_path.glob("gem_contracts*.xlsx"), key=os.path.getmtime, reverse=True)
+    candidates = []
+    try:
+        candidates.append(_resolve(output_dir))
+    except Exception:
+        pass
+    candidates.append(DEFAULT_OUTPUT_PATH)
+    candidates.append(ROOT_DIR / "output")
+
+    xlsx_files = []
+    for cand in candidates:
+        if cand.exists():
+            found = sorted(cand.glob("gem_contracts*.xlsx"), key=os.path.getmtime, reverse=True)
+            if found:
+                xlsx_files.extend(found)
+                break
 
     if not xlsx_files:
-        return JSONResponse(status_code=404, content={"error": "Excel file not found. Process PDFs first."})
+        # Fallback: generate from existing json
+        all_records = load_existing_json(str(DEFAULT_OUTPUT_PATH))
+        if all_records:
+            target_file = DEFAULT_OUTPUT_PATH / EXCEL_FILENAME
+            write_styled_excel(all_records, str(target_file), is_master=True)
+            xlsx_files = [target_file]
+        else:
+            return JSONResponse(status_code=404, content={"error": "Excel file not found. Process PDFs first."})
 
     return FileResponse(
         path=str(xlsx_files[0]),
         filename=EXCEL_FILENAME,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{EXCEL_FILENAME}"'}
     )
 
 

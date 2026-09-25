@@ -1,23 +1,119 @@
 {
   "global_stats": {
     "total_pdfs_scanned": 50,
-    "total_pdfs_extracted": 0,
+    "total_pdfs_extracted": 816,
     "total_scans_performed": 1,
-    "total_extractions_performed": 0,
+    "total_extractions_performed": 8,
     "last_scan_at": "2026-09-15T09:15:02Z",
-    "last_extraction_at": null
+    "last_extraction_at": "2026-09-20T12:10:30Z"
   },
   "user_stats": {
     "indonesiaka30@gmail.com": {
       "email": "indonesiaka30@gmail.com",
       "total_pdfs_scanned": 50,
-      "total_pdfs_extracted": 0,
+      "total_pdfs_extracted": 95,
       "scans_count": 1,
-      "extractions_count": 0,
-      "last_active_at": "2026-09-15T09:15:02Z"
+      "extractions_count": 1,
+      "last_active_at": "2026-09-19T12:49:56Z"
+    },
+    "amitk839170@gmail.com": {
+      "email": "amitk839170@gmail.com",
+      "total_pdfs_scanned": 0,
+      "total_pdfs_extracted": 721,
+      "scans_count": 0,
+      "extractions_count": 7,
+      "last_active_at": "2026-09-20T12:10:30Z"
     }
   },
   "activity_log": [
+    {
+      "id": "ceb96d1a",
+      "timestamp": "2026-09-20T12:10:30Z",
+      "user_email": "amitk839170@gmail.com",
+      "action": "extract",
+      "total_pdfs": 266,
+      "pass_count": 217,
+      "review_count": 49,
+      "folder": "output",
+      "description": "Extracted 266 PDF(s) (217 PASS, 49 REVIEW)"
+    },
+    {
+      "id": "57c6aaf6",
+      "timestamp": "2026-09-19T12:49:56Z",
+      "user_email": "indonesiaka30@gmail.com",
+      "action": "extract",
+      "total_pdfs": 95,
+      "pass_count": 84,
+      "review_count": 11,
+      "folder": "output",
+      "description": "Extracted 95 PDF(s) (84 PASS, 11 REVIEW)"
+    },
+    {
+      "id": "e3d5a3cc",
+      "timestamp": "2026-09-18T18:10:57Z",
+      "user_email": "amitk839170@gmail.com",
+      "action": "extract",
+      "total_pdfs": 74,
+      "pass_count": 69,
+      "review_count": 5,
+      "folder": "output",
+      "description": "Extracted 74 PDF(s) (69 PASS, 5 REVIEW)"
+    },
+    {
+      "id": "a696c7a5",
+      "timestamp": "2026-09-18T18:03:30Z",
+      "user_email": "amitk839170@gmail.com",
+      "action": "extract",
+      "total_pdfs": 74,
+      "pass_count": 69,
+      "review_count": 5,
+      "folder": "output",
+      "description": "Extracted 74 PDF(s) (69 PASS, 5 REVIEW)"
+    },
+    {
+      "id": "8203ac59",
+      "timestamp": "2026-09-18T17:59:31Z",
+      "user_email": "amitk839170@gmail.com",
+      "action": "extract",
+      "total_pdfs": 73,
+      "pass_count": 71,
+      "review_count": 2,
+      "folder": "output",
+      "description": "Extracted 73 PDF(s) (71 PASS, 2 REVIEW)"
+    },
+    {
+      "id": "ba17aafd",
+      "timestamp": "2026-09-18T17:38:21Z",
+      "user_email": "amitk839170@gmail.com",
+      "action": "extract",
+      "total_pdfs": 78,
+      "pass_count": 71,
+      "review_count": 7,
+      "folder": "output",
+      "description": "Extracted 78 PDF(s) (71 PASS, 7 REVIEW)"
+    },
+    {
+      "id": "03532a9c",
+      "timestamp": "2026-09-18T17:22:54Z",
+      "user_email": "amitk839170@gmail.com",
+      "action": "extract",
+      "total_pdfs": 78,
+      "pass_count": 71,
+      "review_count": 7,
+      "folder": "output",
+      "description": "Extracted 78 PDF(s) (71 PASS, 7 REVIEW)"
+    },
+    {
+      "id": "b2c22cc9",
+      "timestamp": "2026-09-18T17:18:42Z",
+      "user_email": "amitk839170@gmail.com",
+      "action": "extract",
+      "total_pdfs": 78,
+      "pass_count": 71,
+      "review_count": 7,
+      "folder": "output",
+      "description": "Extracted 78 PDF(s) (71 PASS, 7 REVIEW)"
+    },
     {
       "id": "6cfab680",
       "timestamp": "2026-09-15T09:15:02Z",

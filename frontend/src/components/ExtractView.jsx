@@ -16,7 +16,8 @@ import {
   Sparkles,
   ArrowRight,
   UploadCloud,
-  X
+  X,
+  Download
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { useToast } from '../context/ToastContext';
@@ -285,6 +286,7 @@ export default function ExtractView({
   // Handle Start Extraction
   const handleStartExtraction = async () => {
     stopTimers();
+    if (onResetBatch) onResetBatch();
     setIsExtracting(true);
 
     const totalFiles = selectedFiles.length > 0 ? selectedFiles.length : (scanResult?.new_to_process || 1);
@@ -382,10 +384,16 @@ export default function ExtractView({
           try {
             const blob = await api.getBatchExcelBlob(outputDir);
             const dateStr = new Date().toISOString().slice(0, 10);
-            const fileHandle = await outputDirHandle.getFileHandle(`gem_contracts_${dateStr}.xlsx`, { create: true });
+            const fileHandle = await outputDirHandle.getFileHandle(`gem_contracts.xlsx`, { create: true });
             const writable = await fileHandle.createWritable();
             await writable.write(blob);
             await writable.close();
+
+            const datedFileHandle = await outputDirHandle.getFileHandle(`gem_contracts_${dateStr}.xlsx`, { create: true });
+            const datedWritable = await datedFileHandle.createWritable();
+            await datedWritable.write(blob);
+            await datedWritable.close();
+
             addToast(`Output Excel saved directly into your "${outputDirHandle.name}" folder!`, 'success', 4000);
           } catch (writeErr) {
             console.error('Direct folder write error:', writeErr);
@@ -463,6 +471,27 @@ export default function ExtractView({
             subMessage: 'Output Excel generated without validation columns.'
           });
 
+          // Direct write to user's selected folder handle if available
+          if (outputDirHandle) {
+            try {
+              const blob = await api.getBatchExcelBlob(outputDir);
+              const dateStr = new Date().toISOString().slice(0, 10);
+              const fileHandle = await outputDirHandle.getFileHandle(`gem_contracts.xlsx`, { create: true });
+              const writable = await fileHandle.createWritable();
+              await writable.write(blob);
+              await writable.close();
+
+              const datedFileHandle = await outputDirHandle.getFileHandle(`gem_contracts_${dateStr}.xlsx`, { create: true });
+              const datedWritable = await datedFileHandle.createWritable();
+              await datedWritable.write(blob);
+              await datedWritable.close();
+
+              addToast(`Output Excel saved directly into your "${outputDirHandle.name}" folder!`, 'success', 4000);
+            } catch (writeErr) {
+              console.error('Direct folder write error:', writeErr);
+            }
+          }
+
           try {
             confetti({
               particleCount: 80,
@@ -498,8 +527,12 @@ export default function ExtractView({
           <div className="flex items-center gap-2">
             <button
               onClick={() => {
-                setInputDir(config.default_input_dir || './pdfs');
-                setOutputDir(config.default_output_dir || './output');
+                setInputDir(config?.default_input_dir || './pdfs');
+                setOutputDir(config?.default_output_dir || './output');
+                setSelectedFiles([]);
+                setSelectedFolderName('');
+                setScanResult(null);
+                if (onResetBatch) onResetBatch();
                 addToast('Reset to default folders', 'info');
               }}
               className="btn-white text-xs px-3 py-2"
@@ -875,19 +908,41 @@ export default function ExtractView({
             </div>
           </div>
 
-          {/* If completed, show Jump to Records CTA */}
+          {/* If completed, show Jump to Records & Download Excel CTA */}
           {progress.completed && (
-            <div className="pt-3 border-t border-amber-200/60 flex items-center justify-between">
-              <span className="text-xs font-semibold text-amber-950">
-                All records parsed and ready.
-              </span>
-              <button
-                onClick={() => onNavigate('records')}
-                className="btn-yellow text-xs px-4 py-2 font-bold"
-              >
-                <span>View Extracted Records</span>
-                <ArrowRight className="w-3.5 h-3.5" />
-              </button>
+            <div className="pt-3.5 border-t border-amber-200/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-amber-950">
+                  Batch Output Ready
+                </span>
+                <span className="text-[11px] font-mono text-slate-500 bg-amber-100/70 border border-amber-300/80 px-2 py-0.5 rounded-md">
+                  Saved to: {outputDir || './output'}/gem_contracts.xlsx
+                </span>
+              </div>
+              <div className="flex items-center gap-2.5">
+                <button
+                  onClick={async () => {
+                    try {
+                      await api.downloadBatchExcel(outputDir.trim() || './output');
+                      addToast('Output Excel downloaded successfully!', 'success');
+                    } catch (e) {
+                      addToast(e.message || 'Download failed', 'error');
+                    }
+                  }}
+                  className="btn-white text-xs px-3.5 py-2 font-bold flex items-center gap-1.5 shadow-xs hover:border-amber-400"
+                  title="Download styled batch output Excel"
+                >
+                  <Download className="w-3.5 h-3.5 text-amber-600" />
+                  <span>Download Excel (.xlsx)</span>
+                </button>
+                <button
+                  onClick={() => onNavigate('records')}
+                  className="btn-yellow text-xs px-4 py-2 font-bold shadow-warm-xs"
+                >
+                  <span>View Records</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
           )}
         </div>

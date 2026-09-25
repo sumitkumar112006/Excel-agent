@@ -12,6 +12,7 @@ import AdminView from './components/AdminView';
 import { api } from './api/client';
 import { useToast } from './context/ToastContext';
 import { useAuth } from './context/AuthContext';
+import { exportRecordsToExcel } from './utils/excelExporter';
 
 export default function App() {
   const { addToast } = useToast();
@@ -135,20 +136,16 @@ export default function App() {
     checkHealth().then((online) => {
       if (online) {
         loadConfig();
-        loadDashboardData();
       }
     });
 
     // Polling heartbeat every 5s
     const heartbeat = setInterval(async () => {
-      const online = await checkHealth();
-      if (online && !backendStatus.ok) {
-        loadDashboardData();
-      }
+      await checkHealth();
     }, 5000);
 
     return () => clearInterval(heartbeat);
-  }, [checkHealth, loadConfig, loadDashboardData, backendStatus.ok]);
+  }, [checkHealth, loadConfig]);
 
   // Trigger loadRecords when navigating to records or changing query
   useEffect(() => {
@@ -171,16 +168,35 @@ export default function App() {
 
   // Download Handlers
   const handleDownloadExcel = async () => {
+    // 1. If we have records in memory in React state, export immediately via SheetJS!
+    if (records && records.length > 0) {
+      try {
+        exportRecordsToExcel(records);
+        addToast(`Downloaded Excel spreadsheet with ${records.length} records!`, 'success');
+        return;
+      } catch (clientErr) {
+        console.warn('Client export fallback to API:', clientErr);
+      }
+    }
+
+    // 2. Try fetching from backend batch endpoint
     try {
-      addToast('Preparing batch Excel workbook...', 'info', 2000);
-      await api.downloadBatchExcel(config.default_output_dir || './output');
-      addToast('Batch Excel spreadsheet downloaded successfully!', 'success');
+      addToast('Preparing Excel workbook...', 'info', 2000);
+      await api.downloadBatchExcel(config?.default_output_dir || './output');
+      addToast('Excel spreadsheet downloaded successfully!', 'success');
     } catch (err) {
       try {
-        await api.downloadExcel(config.default_output_dir || './output');
-        addToast('Master Excel spreadsheet downloaded successfully!', 'success');
+        // 3. Fallback: try fetching latest records from backend to export
+        const data = await api.getRecords({ limit: 1000, batchOnly: true });
+        if (data && data.records && data.records.length > 0) {
+          exportRecordsToExcel(data.records);
+          addToast(`Downloaded Excel spreadsheet with ${data.records.length} records!`, 'success');
+          return;
+        }
+        await api.downloadExcel(config?.default_output_dir || './output');
+        addToast('Excel spreadsheet downloaded successfully!', 'success');
       } catch (masterErr) {
-        addToast(err.message || 'Excel download failed', 'error');
+        addToast('No extracted records found to download. Please extract PDFs first.', 'warning');
       }
     }
   };
@@ -207,7 +223,7 @@ export default function App() {
 
   const handleResetBatch = async () => {
     try {
-      await api.clearBatch();
+      await api.clearBatch(config?.default_output_dir || './output');
     } catch {
       // ignore
     }
@@ -220,6 +236,7 @@ export default function App() {
       passCount: 0,
       reviewCount: 0,
     });
+    setSelectedRecord(null);
     addToast('Previous batch records cleared from UI view.', 'info');
   };
 

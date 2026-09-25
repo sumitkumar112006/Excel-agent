@@ -25,6 +25,8 @@ output/
 output_dir/
 temp/
 scratch/
+references
+01-Oct-25 To 31-Dec-25
 
 # OS & Editor Files
 .DS_Store

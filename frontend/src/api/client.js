@@ -208,11 +208,15 @@ export const api = {
     const downloadUrl = window.URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = downloadUrl;
-    link.download = `gem_contracts_${new Date().toISOString().slice(0, 10)}.xlsx`;
+    link.setAttribute('download', `gem_contracts_${new Date().toISOString().slice(0, 10)}.xlsx`);
     document.body.appendChild(link);
     link.click();
-    link.remove();
-    window.URL.revokeObjectURL(downloadUrl);
+    setTimeout(() => {
+      try {
+        link.remove();
+        window.URL.revokeObjectURL(downloadUrl);
+      } catch {}
+    }, 15000);
     return blob;
   },
 
@@ -229,11 +233,15 @@ export const api = {
     const downloadUrl = window.URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = downloadUrl;
-    link.download = `gem_contracts_master_${new Date().toISOString().slice(0, 10)}.xlsx`;
+    link.setAttribute('download', `gem_contracts_${new Date().toISOString().slice(0, 10)}.xlsx`);
     document.body.appendChild(link);
     link.click();
-    link.remove();
-    window.URL.revokeObjectURL(downloadUrl);
+    setTimeout(() => {
+      try {
+        link.remove();
+        window.URL.revokeObjectURL(downloadUrl);
+      } catch {}
+    }, 15000);
     return true;
   },
 
