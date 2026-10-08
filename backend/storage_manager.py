@@ -2,11 +2,13 @@
 storage_manager.py — Excel & JSON Multi-Batch Append & Storage Engine
 ====================================================================
 Manages saving, updating, and appending extracted contract records into:
-  1. output/gem_contracts.xlsx (Formatted, styled master sheet)
-  2. output/gem_contracts.json (Structured JSON array)
+  1. output/gem_contracts.xlsx (Formatted, styled master sheet — APPENDS to existing)
+  2. output/gem_contracts.json (Structured JSON array — APPENDS to existing)
   3. output/records.jsonl (Append-friendly line-by-line log)
+  4. output/gem_contracts_batch.xlsx (Current batch only — always fresh)
 
-Handles multi-batch execution seamlessly without overwriting existing data.
+New records are deduplicated by content signature before appending, so
+re-processing the same PDFs will NOT create duplicate rows.
 Resilient against Windows Excel file locks.
 """
 
@@ -153,8 +155,10 @@ def load_batch_json(output_dir: str = DEFAULT_OUTPUT_DIR) -> List[Dict[str, Any]
 
 
 def clear_batch_json(output_dir: str = DEFAULT_OUTPUT_DIR) -> None:
-    """Clears current batch JSON and output files."""
-    for fname in [BATCH_JSON_FILENAME, JSON_FILENAME, JSONL_FILENAME, BATCH_EXCEL_FILENAME]:
+    """Clears only the current-batch temporary files.
+    Does NOT delete gem_contracts.json or records.jsonl — those hold
+    the full cumulative history and must be preserved for append to work."""
+    for fname in [BATCH_JSON_FILENAME, BATCH_EXCEL_FILENAME]:
         p = os.path.join(output_dir, fname)
         if os.path.exists(p):
             try:
@@ -200,49 +204,89 @@ def get_record_signature(r: Dict[str, Any]) -> str:
 
 def save_batch_records(batch_records: List[Dict[str, Any]], output_dir: str = DEFAULT_OUTPUT_DIR) -> Dict[str, Any]:
     """
-    Saves batch records strictly for the current batch:
-    1. Saves output/current_batch.json & output/gem_contracts.json (batch data for UI display)
-    2. Generates output/gem_contracts_batch.xlsx & output/gem_contracts.xlsx containing ONLY this batch's records (fresh Excel, no mixing with past batches)
-    3. Generates output/records.jsonl for current batch
+    Saves batch records and APPENDS them to the existing master files if present:
+    1. Loads any existing gem_contracts.json records and merges with new batch (deduplication via content signature)
+    2. Saves output/current_batch.json (current batch only) and output/gem_contracts.json (full cumulative dataset)
+    3. Generates output/gem_contracts_batch.xlsx (current batch only — always fresh)
+    4. Generates output/gem_contracts.xlsx (full cumulative dataset — appended to existing)
+    5. Appends to output/records.jsonl
     """
     ensure_output_dir(output_dir)
 
-    # 1. Save Batch JSON & master JSON (always fresh for this batch)
     batch_json_path = os.path.join(output_dir, BATCH_JSON_FILENAME)
     master_json_path = os.path.join(output_dir, JSON_FILENAME)
     jsonl_path = os.path.join(output_dir, JSONL_FILENAME)
+    batch_excel_path = os.path.join(output_dir, BATCH_EXCEL_FILENAME)
+    master_excel_path = os.path.join(output_dir, EXCEL_FILENAME)
 
+    # ── Step 1: Load existing master records (if any) ──────────────────────────
+    existing_records: List[Dict[str, Any]] = []
+    if os.path.exists(master_json_path):
+        try:
+            with open(master_json_path, 'r', encoding='utf-8') as f:
+                loaded = json.load(f)
+                if isinstance(loaded, list):
+                    existing_records = loaded
+        except Exception as e:
+            print(f"[append] Could not load existing master JSON, starting fresh: {e}")
+
+    # ── Step 2: Deduplicate new records against existing ones ───────────────────
+    existing_sigs = {get_record_signature(r) for r in existing_records}
+    truly_new = [r for r in batch_records if get_record_signature(r) not in existing_sigs]
+    duplicate_count = len(batch_records) - len(truly_new)
+    if duplicate_count:
+        print(f"[append] Skipped {duplicate_count} duplicate record(s) already in master file.")
+
+    # ── Step 3: Build merged dataset (existing first, then new) ────────────────
+    merged_records = existing_records + truly_new
+
+    # ── Step 4: Save current_batch.json (this batch only) ──────────────────────
     try:
         with open(batch_json_path, 'w', encoding='utf-8') as f:
             json.dump(batch_records, f, indent=2, ensure_ascii=False)
-        with open(master_json_path, 'w', encoding='utf-8') as f:
-            json.dump(batch_records, f, indent=2, ensure_ascii=False)
-        with open(jsonl_path, 'w', encoding='utf-8') as f:
-            for r in batch_records:
-                f.write(json.dumps(r, ensure_ascii=False) + '\n')
     except Exception as e:
         print(f"Error saving batch JSON: {e}")
 
-    # 2. Save User Output Batch Excel & Master Excel (fresh workbook with only this batch's records)
-    batch_excel_path = os.path.join(output_dir, BATCH_EXCEL_FILENAME)
-    master_excel_path = os.path.join(output_dir, EXCEL_FILENAME)
+    # ── Step 5: Save gem_contracts.json (cumulative dataset) ───────────────────
+    try:
+        with open(master_json_path, 'w', encoding='utf-8') as f:
+            json.dump(merged_records, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"Error saving master JSON: {e}")
+
+    # ── Step 6: Append new records to records.jsonl ────────────────────────────
+    try:
+        with open(jsonl_path, 'a', encoding='utf-8') as f:
+            for r in truly_new:
+                f.write(json.dumps(r, ensure_ascii=False) + '\n')
+    except Exception as e:
+        print(f"Error appending to JSONL: {e}")
+
+    # ── Step 7: Write batch-only Excel (current batch, always fresh) ───────────
     try:
         write_styled_excel(batch_records, batch_excel_path, is_master=False)
-        write_styled_excel(batch_records, master_excel_path, is_master=False)
     except Exception as e:
         print(f"Error saving batch Excel: {e}")
 
+    # ── Step 8: Write cumulative master Excel (all records incl. appended) ─────
+    try:
+        write_styled_excel(merged_records, master_excel_path, is_master=False)
+    except Exception as e:
+        print(f"Error saving master Excel: {e}")
+
     return {
         "batch_count": len(batch_records),
+        "new_appended": len(truly_new),
+        "duplicates_skipped": duplicate_count,
+        "master_total": len(merged_records),
         "batch_json": batch_json_path,
         "batch_excel": batch_excel_path,
-        "master_total": len(batch_records)
     }
 
 
 def save_and_append_records(new_records: List[Dict[str, Any]], output_dir: str = DEFAULT_OUTPUT_DIR, reprocess_all: bool = False) -> Dict[str, Any]:
     """
-    Saves records fresh for the current batch without appending old batches.
+    Alias for save_batch_records — appends new records to the master Excel & JSON.
     """
     return save_batch_records(new_records, output_dir)
 

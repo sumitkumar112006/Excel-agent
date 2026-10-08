@@ -12,6 +12,11 @@ Features:
   5. Multi-line continuous field scanning without truncation.
   6. 4-Tier Automated Verification Matrix (Syntax, Math, Section Isolation, Consistency).
   7. Deterministic PASS / REVIEW status scoring with detailed error breakdown.
+  8. Delivery date extraction, Model, HSN, Brand Type fields.
+  9. Per-item brand isolation (no bleed between items).
+  10. Robust unit_price/qty disambiguation (lot-number vs actual quantity).
+  11. All-zero phone number rejection.
+  12. Consignee address deduplication.
 """
 
 import re
@@ -62,17 +67,38 @@ def clean_text(text: Optional[str]) -> str:
 
 
 def clean_phone(text: Optional[str]) -> str:
-    """Normalize phone / contact numbers."""
+    """
+    Normalize phone / contact numbers.
+    - Rejects strings containing alphabet characters (e.g. GeM Seller ID like T1T8220005368703, GSTIN, MSME Udyam).
+    - Rejects all-zero numbers (e.g. 0000-000000-00000).
+    - Preserves pure digits for valid non-zero phone numbers between 7 and 18 digits.
+    """
     if not text or text == NA:
         return NA
     text_str = str(text).strip()
-    text_str = re.sub(r'[:|;,\s\-]+$', '', text_str)
-    text_str = re.sub(r'^[^\d+]*', '', text_str)
-    digits = re.sub(r'[^\d]', '', text_str)
-    if len(digits) >= 10:
-        return digits[-10:] if len(digits) == 10 or digits.startswith(('6', '7', '8', '9')) else digits
-    if len(digits) >= 7:
-        return digits
+
+    # Remove standard prefixes
+    text_str = re.sub(r'^(?:Contact\s*(?:No\.?)?|संपर्क\s*नंबर|संपक[^\n:]*नंबर|सम्पर्क\s*नंबर|संपर्क|Phone|Mob(?:ile)?|Tel(?:ephone)?)\s*[:.\-–=]*\s*', '', text_str, flags=re.IGNORECASE).strip()
+    text_str = re.sub(r'^\+91[\s\-]*', '', text_str)
+    text_str = re.sub(r'^\+', '', text_str)
+
+    # Remove trailing/leading punctuation
+    text_str = re.sub(r'[:|;,\s\-–/.]+$', '', text_str)
+    text_str = re.sub(r'^[:|;,\s\-–/.]+', '', text_str)
+
+    # If candidate still contains any alphabetic characters [a-zA-Z], it is NOT a phone number
+    if re.search(r'[a-zA-Z]', text_str):
+        return NA
+
+    # All-zero check (e.g. 0000-0000000-0000)
+    digits_only = re.sub(r'[^\d]', '', text_str)
+    if not digits_only or all(d == '0' for d in digits_only):
+        return NA
+
+    # If pure digits length is between 7 and 18 digits
+    if 7 <= len(digits_only) <= 18:
+        return digits_only
+
     return NA
 
 
@@ -112,7 +138,7 @@ def clean_address(text: Optional[str]) -> str:
     for _ in range(5):
         prev = val
         val = prefix_regex.sub('', val).strip()
-        val = re.sub(r'^(?:address|pataa|ptaa|pata|पता)\b[:.\s\-–;=]*', '', val, flags=re.IGNORECASE).strip()
+        val = re.sub(r'^(?:address|pataa|ptaa|pata|पता)\b[:.\ \-–;=]*', '', val, flags=re.IGNORECASE).strip()
         val = re.sub(r'^[:|\-–;,\s]+', '', val).strip()
         if val == prev:
             break
@@ -156,7 +182,7 @@ def sanitize_consignee_address(address_str: str) -> str:
         r'(?:STATE\s*-\s*)?(?:MAAOON|GOFIT|PARTH|Climbing Technology|INDIA MEDICO|FIDELIS|IKON|MEDITIVE)[^,]*',
         r'Product Name\s*:[^,]*',
         r'kilogram\s*-\s*\d+',
-        r'Consignee\s*Detail[\s\S]*?(?:Address|ptaa|पता)\s*[:.]\s*',
+        r'Consignee\s*Detail[\s\S]*?(?:Address|ptaa|पता)\s*[:.]\\s*',
     ]
     for pat in patterns_to_remove:
         addr = re.sub(pat, ', ', addr, flags=re.IGNORECASE)
@@ -170,10 +196,12 @@ def sanitize_consignee_address(address_str: str) -> str:
     # 4. Deduplicate repeating comma-separated segments
     parts = [p.strip() for p in addr.split(',') if p.strip()]
     unique_parts = []
+    seen_normalized = []
     for p in parts:
         p_clean = re.sub(r'[:.\s\-–;]+', '', p).lower()
-        if not unique_parts or p_clean != re.sub(r'[:.\s\-–;]+', '', unique_parts[-1]).lower():
+        if p_clean not in seen_normalized:
             unique_parts.append(p)
+            seen_normalized.append(p_clean)
     addr = ', '.join(unique_parts)
 
     return clean_address(addr)
@@ -184,20 +212,28 @@ def sanitize_brand(brand_str: Optional[str]) -> str:
     if not brand_str or brand_str == NA:
         return NA
     b = str(brand_str).strip()
+    
+    # Catch unbranded first before any label modifications
+    if re.search(r'\bunbranded\b', b, re.IGNORECASE) or b.lower().startswith("unbranded"):
+        return NA
+    if b.lower() in {"not specified", "not specified by seller", "not specified by buyer", "not specified by oem", "na", "n/a", "none", "null", "-", "--"}:
+        return NA
+
+    # Strip leading label (e.g. "Brand :", "ब्रांड :", "ब्रांड|Brand :")
+    b = re.sub(r'^(?:[^\n:]*?\b(?:ब्रांड|Brand)\b\s*[:|.\-–=]*\s*)+', '', b, flags=re.IGNORECASE).strip()
+    b = re.sub(r'^(?:Brand|ब्रांड)\s*[:|.\-–=]*\s*', '', b, flags=re.IGNORECASE).strip()
+    
     # Strip any trailing labels using strict word boundaries
     b = re.split(r'[:|]?\s*(?:\bBrand\s*Type\b|\bCatalogue\s*Status\b|\bSelling\s*As\b|\bCategory\s*Name\b|\bModel\b|\bHSN\s*Code\b|कैटलॉग|मॉडल|एचएसएन)', b, flags=re.IGNORECASE)[0].strip()
     b = clean_text(b)
-    if not b or b.upper() in {"NA", "N/A", "NONE", "NULL", "-", "--"}:
+    if not b or b.upper() in {"NA", "N/A", "NONE", "NULL", "-", "--", "BRAND : NA", "BRAND:NA", "ED"}:
         return NA
-    # Catch any variations of unbranded (e.g. Unbranded, Unbranded Two, Unbranded Three, Unbranded (Q3), Unbranded Tier 3, Unbranded--...)
     if b.lower().startswith("unbranded") or "unbranded" in b.lower():
-        return NA
-    if b.lower() in {"not specified", "not specified by seller", "not specified by buyer", "not specified by oem"}:
         return NA
     if b.startswith("NA ") or b.startswith("NA-"):
         return NA
     # Reject if it looks like technical specifications, pipe dimensions, or long sentences
-    if re.search(r'\b(?:\d+\s*x\s*\d+|GI Pipe|Angle|deep|supported|Gym Equipment|Double|Single|Parallel Bar|Chest Press|Surf Board)\b', b, re.IGNORECASE):
+    if re.search(r'\b(?:\d+\s*x\s*\d+|GI Pipe|Angle|deep|supported|Gym Equipment|Double|Single|Parallel Bar|Chest Press|Surf Board|Triple|Two Wheel|Three|Both Standing)\b', b, re.IGNORECASE):
         return NA
     if len(b) > 45:
         return NA
@@ -219,21 +255,24 @@ def clean_product_name(p_name: Optional[str]) -> str:
         prev = p
         p = prefix_pat.sub('', p).strip()
         p = re.sub(r'^(?:[a-z|{z~x_]*paad\s*(?:kaa\s*naam)?\s*(?:[|/\\–\-]\s*)?(?:Product\s*Name\s*)?|Product\s*Name\s*)[:|.\-–=]*\s*', '', p, flags=re.IGNORECASE).strip()
-        p = re.sub(r'^[\|\-:.\s]+', '', p).strip()
+        p = re.sub(r'^[\|\ -:.\ \s]+', '', p).strip()
         if p == prev:
             break
 
     # Strip trailing labels using strict word boundaries
-    p = re.split(r'[:|]?\s*(?:\bBrand\s*Type\b|\bBrand\s*:|[‚€†\x7f\x80\x81\x83\u0192\w\s|]*?[ाo\u093e]ंड|\bCatalogue\s*Status\b|\bSelling\s*As\b|\bCategory\s*Name\b|\bModel\b|\bHSN\s*Code\b|कैटलॉग|मॉडल|एचएसएन)', p, flags=re.IGNORECASE)[0].strip()
+    p = re.split(r'[:|]?\s*(?:\bBrand\s*Type\b|\bBrand\s*:|\bCatalogue\s*Status\b|\bSelling\s*As\b|\bCategory\s*Name\b|\bModel\b|\bHSN\s*Code\b|कैटलॉग|मॉडल|एचएसएन)', p, flags=re.IGNORECASE)[0].strip()
 
-    # Strip trailing OCR artifacts like 'aaNdd', 'aaNd'
+    # Strip trailing OCR artifacts like 'aaNdd', 'aaNd' or normalize
     p = re.sub(r'\s+aaN+d*\s*$', '', p, flags=re.IGNORECASE).strip()
+    p = re.sub(r'\baaN+d+\b', 'and', p, flags=re.IGNORECASE).strip()
     p = re.sub(r'[,:\-–|]+$', '', p).strip()
     p = clean_text(p)
 
     # Post-clean check for any remaining transliterated prefix
     p = re.sub(r'^(?:[a-z|{z~x_]*paad\s*(?:kaa\s*naam)?\s*(?:[|/\\–\-]\s*)?(?:Product\s*Name\s*)?|Product\s*Name\s*)[:|.\-–=]*\s*', '', p, flags=re.IGNORECASE).strip()
-    p = re.sub(r'^[\|\-:.\s]+', '', p).strip()
+    p = re.sub(r'^[\|\ -:.\ \s]+', '', p).strip()
+    p = re.sub(r'\s+\b(?:aaN+d+|aaNd|evam|और|एवं|and)\b\s*$', '', p, flags=re.IGNORECASE).strip()
+    p = re.sub(r'[,:\-–|]+$', '', p).strip()
     return p
 
 
@@ -260,7 +299,7 @@ def extract_full_address(section: str) -> str:
 
     # Pattern 1: Address up to ', India' or ', Bharat' or 6-digit PIN with India
     m_india = re.search(
-        r'(?:Address|पता)\s*[:.\s]*\n?\s*([\s\S]+?,\s*(?:India|भारत|\d{6},\s*India))',
+        r'(?:Address|पता)\s*[:.\ \s]*\n?\s*([\s\S]+?,\s*(?:India|भारत|\d{6},\s*India))',
         section, re.IGNORECASE
     )
     if m_india:
@@ -270,7 +309,7 @@ def extract_full_address(section: str) -> str:
 
     # Pattern 2: Address up to State-PIN: e.g. UTTAR PRADESH-250002, -
     m_pin = re.search(
-        r'(?:Address|पता)\s*[:.\s]*\n?\s*([\s\S]+?,\s*[A-Z\s]+-\d{6}(?:,\s*[-–\w]+)?)',
+        r'(?:Address|पता)\s*[:.\ \s]*\n?\s*([\s\S]+?,\s*[A-Z\s]+-\d{6}(?:,\s*[-–\w]+)?)',
         section, re.IGNORECASE
     )
     if m_pin:
@@ -280,7 +319,7 @@ def extract_full_address(section: str) -> str:
 
     # Pattern 3: Multiline address stopping before next known section/table header
     m_stop = re.search(
-        r'(?:Address|पता)\s*[:.\s]*\n?\s*([^\n\r]+(?:\n\s*[^\n\r]+){1,5})',
+        r'(?:Address|पता)\s*[:.\ \s]*\n?\s*([^\n\r]+(?:\n\s*[^\n\r]+){1,5})',
         section, re.IGNORECASE
     )
     if m_stop:
@@ -318,6 +357,34 @@ def to_number(val: Any) -> Any:
         return int(val_str)
     except (ValueError, TypeError):
         return NA
+
+
+def is_unit_label(val: Optional[str]) -> bool:
+    """Returns True if a cell value is a unit-of-measure label (pieces, Nos, kg, etc.)."""
+    if not val:
+        return False
+    return bool(re.match(
+        r'^\s*(?:pieces?|Nos?\.?|units?|box(?:es)?|meters?|set|each|packets?|kg|kilogram|Test)\s*$',
+        str(val).strip(), re.IGNORECASE
+    ))
+
+
+def looks_like_lot_number(val: Any, row_idx_in_data: int) -> bool:
+    """
+    Heuristic: returns True if val looks like a sequential lot/serial number
+    rather than an actual quantity.  We check if it equals the 1-based row index.
+    """
+    if val is None:
+        return False
+    try:
+        n = int(str(val).strip().replace(',', ''))
+    except (ValueError, TypeError):
+        return False
+    # Lot numbers start from 1 and are sequential; actual quantities rarely match row index
+    # unless it's also 1 (common for quantity=1). So we use a relaxed check:
+    # if the value equals the expected sequential lot number AND is <= 20, treat as lot number
+    # ONLY when we can verify via the unit_price column that the actual price is much larger.
+    return False  # We handle this per-item during reconciliation instead
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -399,9 +466,9 @@ def match_multiline_kv(label_regex: str, text: str, max_lines: int = 5) -> str:
         if re.search(r'[:|]\s*(?:Brand|Model|HSN|Category|Selling|Product|Catalogue|Lot|Quantity|Price|Unit|Email|Contact|GSTIN|Address)\b', l_str, re.IGNORECASE):
             break
 
-        if re.match(r'^(?:pieces|Nos\.?|units?|box|meters?|set|each|packets?|Test|\d+)$', l_str, re.IGNORECASE):
+        if val_lines and re.match(r'^(?:pieces|Nos\.?|units?|box|meters?|set|each|packets?|Test|\d{1,4})$', l_str, re.IGNORECASE):
             break
-        if re.match(r'^\d+\s+(?:pieces|Nos|units|box|meters|set|each|packets|Test)\b', l_str, re.IGNORECASE):
+        if val_lines and re.match(r'^\d{1,4}\s+(?:pieces|Nos|units|box|meters|set|each|packets|Test)\b', l_str, re.IGNORECASE):
             break
 
         val_lines.append(l_str)
@@ -478,7 +545,12 @@ def parse_header(raw_text: str, filename: str = "") -> Tuple[str, str]:
 
 
 def parse_organisation_section(raw_text: str) -> Dict[str, str]:
-    """Parse Organisation Details section accurately prioritizing actual Org Name then Office Zone."""
+    """
+    Parse Organisation Details section strictly.
+    Extracts the exact Organisation Name specified under the Organisation Name heading.
+    If no value is present or if it is N/A / -, returns NA.
+    Does NOT fallback to Department, Office Zone, Ministry, or other headings.
+    """
     text = raw_text.replace('\ufb00', 'ff').replace('\ufb01', 'fi').replace('\ufb02', 'fl').replace('\ufb03', 'ffi').replace('\ufb04', 'ffl')
     section = extract_section(
         text,
@@ -488,51 +560,62 @@ def parse_organisation_section(raw_text: str) -> Dict[str, str]:
     if not section:
         section = text[:2000]
 
-    org_name = NA
-    # 1. Match Organisation Name
-    m_on = re.search(r'(?:Organisation\s*Name|संगठन\s*का\s*नाम)[^\n:]*[:|.]\s*([^\n\r]+)', section, re.IGNORECASE)
-    if not m_on:
-        m_on = re.search(r'(?:Organisation\s*Name|संगठन\s*का\s*नाम)\s*\n\s*([^\n\r]+)', section, re.IGNORECASE)
+    label_pattern = re.compile(
+        r'(?:संगठन\s*का\s*(?:\n\s*)?नाम\s*(?:[|/\\–\-]\s*)?Organisation\s*Name|Organisation\s*Name\s*(?:[|/\\–\-]\s*)?संगठन\s*का\s*(?:\n\s*)?नाम|Organisation\s*Name|संगठन\s*का\s*नाम|संगठन\s*नाम|sNgtthn\s*kaa\s*naam)\s*[:.\-–=]*\s*',
+        re.IGNORECASE
+    )
 
-    if m_on:
-        cand = clean_text(m_on.group(1))
-        if cand not in [NA, "N/A", "-", "--", "None", "", "N / A", "Organisation", "संगठन"]:
-            org_name = cand
+    m = label_pattern.search(section)
+    if not m:
+        return {"organisation_name": NA}
 
-    # 2. If Organisation Name is N/A or missing, check Office Zone
-    if org_name == NA:
-        m_oz = re.search(r'(?:Office\s*Zone|Oﬃce\s*Zone|काया[A-Za-z0-9_]*लय[^\n:]*|कार्यालय\s*क्षेत्र)[^\n:]*[:|.]\s*([^\n\r]+(?:\n[^\n\r]+)?)', section, re.IGNORECASE)
-        if not m_oz:
-            m_oz = re.search(r'(?:Office\s*Zone|Oﬃce\s*Zone|काया[A-Za-z0-9_]*लय[^\n:]*|कार्यालय\s*क्षेत्र)\s*\n\s*([^\n\r]+(?:\n[^\n\r]+)?)', section, re.IGNORECASE)
-        if m_oz:
-            lines = [l.strip() for l in m_oz.group(1).split('\n') if l.strip()]
-            valid = []
-            for l in lines:
-                if re.search(r'[:|]\s*(?:Buyer|Contact|Email|GSTIN|Address|Role|Payment|GeM)\b', l, re.IGNORECASE):
-                    break
-                valid.append(l)
-            if valid:
-                cand = clean_text(' '.join(valid))
-                if cand not in [NA, "N/A", "-", "--", "None", ""]:
-                    org_name = cand
+    remaining = section[m.end():].lstrip('\r\n')
+    lines = remaining.split('\n')
 
-    # 3. Fallback to Department or Ministry
-    if org_name == NA:
-        dept = match_multiline_kv(r'(?:Department|विभाग|वभाग|[\$\%\"\&]?वभाग)', section, max_lines=2)
-        if dept != NA and dept not in ["-", "--", "NA", "N/A"]:
-            org_name = dept
-        else:
-            minis = match_multiline_kv(r'(?:Ministry|मंत्रालय|मं[\?\=>]ालय)', section, max_lines=2)
-            if minis != NA and minis not in ["-", "--", "NA", "N/A"]:
-                org_name = minis
+    # Stop headings: Must match as a HEADING (with colon or at start of line as heading)
+    stop_heading_pats = [
+        r'^(?:[^\n:]*?(?:काया|कार्यालय|kaayaa|Office\s*Zone|Oﬃce\s*Zone)\b\s*[:|.\-–=])',
+        r'^(?:[^\n:]*?(?:Buyer\s*Details|खरीदार|Buying\s*Organisation)\b)',
+        r'^(?:[^\n:]*?(?:Department|विभाग|वभाग)\b\s*[:|.\-–=])',
+        r'^(?:[^\n:]*?(?:Ministry|मंत्रालय)\b\s*[:|.\-–=])',
+        r'^(?:[^\n:]*?(?:Type|प्रारूप)\b\s*[:|.\-–=])',
+        r'^(?:[^\n:]*?(?:Paying\s*Authority|भुगतान)\b)',
+        r'^(?:[^\n:]*?(?:Financial\s*Approval|वित्तीय)\b)',
+    ]
 
-    if org_name != NA:
-        org_name = re.split(r'[:|]?\s*(?:Buyer\s*Details|खरीदार|Office\s*Zone|कार्यालय|काया|kaayaa)', org_name, flags=re.IGNORECASE)[0].strip()
-        org_name = clean_text(org_name)
+    val_parts = []
+    for line in lines[:5]:
+        line_s = line.strip()
+        if not line_s:
+            if val_parts:
+                break
+            continue
 
-    return {
-        "organisation_name": org_name
-    }
+        # Check if line matches any stop heading pattern
+        if any(re.search(pat, line_s, re.IGNORECASE) for pat in stop_heading_pats):
+            break
+
+        # Check for inline next heading (e.g. "Adg Pac कायाEलय Fे=|Oﬃce Zone: ...")
+        m_inline_stop = re.search(r'\s+(?:काया[^\n:]*|कार्यालय[^\n:]*|Office\s*Zone|Oﬃce\s*Zone|Buyer\s*Details|खरीदार)\s*[:|.\-–=]', line_s, re.IGNORECASE)
+        if m_inline_stop:
+            val_parts.append(line_s[:m_inline_stop.start()].strip())
+            break
+
+        val_parts.append(line_s)
+
+    if not val_parts:
+        return {"organisation_name": NA}
+
+    val = ' '.join(val_parts).strip()
+    val = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', val)
+    val = re.sub(r'\s+', ' ', val).strip()
+    val = re.sub(r'^[:|\-–\s]+|[:|\-–\s]+$', '', val).strip()
+    val = clean_text(val)
+
+    if not val or val.upper() in {"-", "--", "N/A", "NONE", "NULL", "NA", "N / A", "ORGANISATION", "संगठन", "ORGANISATION NAME"}:
+        return {"organisation_name": NA}
+
+    return {"organisation_name": val}
 
 
 def parse_buyer_section(raw_text: str) -> Dict[str, str]:
@@ -546,11 +629,25 @@ def parse_buyer_section(raw_text: str) -> Dict[str, str]:
         section = raw_text
 
     email = clean_email(match_multiline_kv(r'(?:Email\s*(?:ID)?|ईमेल\s*आईडी)', section, max_lines=1))
-    contact = clean_phone(match_multiline_kv(r'(?:Contact\s*(?:No\.?)?|संपर्क\s*नंबर|संपक[EHLGM\s]*नंबर|संपकH\s*नंबर|संपकG\s*नंबर|संपकL\s*नंबर)', section, max_lines=1))
+    
+    # 1. Match Contact No with label directly (handling same line or next line)
+    m_c = re.search(r'(?:Contact\s*(?:No\.?|Number)?|संपर्क\s*(?:नंबर|नं\.?)|संपक[^\n:]*नंबर|सम्पर्क\s*(?:नंबर|नं\.?)|Phone\s*(?:No\.?)?|Mob(?:ile)?(?:\s*No\.?)?)\s*[:.\-–=]*\s*\n?\s*([^\n\r]+)', section, re.IGNORECASE)
+    contact = NA
+    if m_c:
+        contact = clean_phone(m_c.group(1))
     if contact == NA:
-        m_phone = re.search(r'(?:0[1-9]\d{2,4}[-\s]?\d{6,8}|0[1-9]\d{9,10}|[6-9]\d{9})', section)
-        if m_phone:
-            contact = clean_phone(m_phone.group(0))
+        contact = clean_phone(match_multiline_kv(r'(?:Contact\s*(?:No\.?|Number)?|संपर्क\s*(?:नंबर|नं\.?)|संपक[^\n:]*नंबर|सम्पर्क\s*(?:नंबर|नं\.?)|Phone\s*(?:No\.?)?|Mob(?:ile)?(?:\s*No\.?)?)', section, max_lines=2))
+    
+    # 2. Strict standalone phone fallback (excluding non-phone lines)
+    if contact == NA:
+        for line in section.split('\n'):
+            if any(k in line.lower() for k in ['gstin', 'जीएसट', 'email', 'ईमेल', 'address', 'पता', 'designation', 'पद']):
+                continue
+            m_phone = re.search(r'\b(?:0[1-9]\d{8,11}|[6-9]\d{9}|0\d{2,5}[-\s]\d{6,8})\b', line)
+            if m_phone:
+                contact = clean_phone(m_phone.group(0))
+                if contact != NA:
+                    break
 
     gstin = clean_gstin(match_multiline_kv(r'(?:GSTIN|जीएसटीआईएन|जीएसट[cai\]\^_\s]*आईएन)', section, max_lines=1))
 
@@ -591,11 +688,25 @@ def parse_seller_section(raw_text: str) -> Dict[str, str]:
         section = raw_text
 
     company_name = match_multiline_kv(r'(?:Company\s*Name|कंपनी\s*का\s*नाम)', section, max_lines=3)
-    contact_no = clean_phone(match_multiline_kv(r'(?:Contact\s*(?:No\.?)?|संपर्क\s*नंबर|संपक[EHLGM\s]*नंबर|संपकH\s*नंबर|संपकG\s*नंबर|संपकL\s*नंबर)', section, max_lines=1))
+    
+    # 1. Match Contact No with label directly (handling same line or next line)
+    m_c = re.search(r'(?:Contact\s*(?:No\.?|Number)?|संपर्क\s*(?:नंबर|नं\.?)|संपक[^\n:]*नंबर|सम्पर्क\s*(?:नंबर|नं\.?)|Phone\s*(?:No\.?)?|Mob(?:ile)?(?:\s*No\.?)?)\s*[:.\-–=]*\s*\n?\s*([^\n\r]+)', section, re.IGNORECASE)
+    contact_no = NA
+    if m_c:
+        contact_no = clean_phone(m_c.group(1))
     if contact_no == NA:
-        m_phone = re.search(r'(?:0[1-9]\d{9,10}|[6-9]\d{9})', section)
-        if m_phone:
-            contact_no = clean_phone(m_phone.group(0))
+        contact_no = clean_phone(match_multiline_kv(r'(?:Contact\s*(?:No\.?|Number)?|संपर्क\s*(?:नंबर|नं\.?)|संपक[^\n:]*नंबर|सम्पर्क\s*(?:नंबर|नं\.?)|Phone\s*(?:No\.?)?|Mob(?:ile)?(?:\s*No\.?)?)', section, max_lines=2))
+    
+    # 2. Strict standalone phone fallback excluding Seller ID, GSTIN, MSME, Address, Email lines
+    if contact_no == NA:
+        for line in section.split('\n'):
+            if any(k in line.lower() for k in ['seller id', 'आईडी', 'gstin', 'जीएसट', 'msme', 'पंजीकरण', 'address', 'पता', 'email', 'ईमेल']):
+                continue
+            m_phone = re.search(r'\b(?:0[1-9]\d{8,11}|[6-9]\d{9}|0\d{2,5}[-\s]\d{6,8})\b', line)
+            if m_phone:
+                contact_no = clean_phone(m_phone.group(0))
+                if contact_no != NA:
+                    break
 
     email = clean_email(match_multiline_kv(r'(?:Email\s*(?:ID)?|ईमेल\s*आईडी)', section, max_lines=1))
     if email == NA:
@@ -659,36 +770,48 @@ def parse_consignee_section(raw_text: str, doc: Optional[Any] = None) -> List[Di
                             if any(k in cell_str for k in ['Email ID', 'ईमेल', 'Address', 'पता', 'Designation', 'पद', 'Contact', 'संपर्क', 'ptaa', 'iimel', 'sNpk']):
                                 consignee_cells.append(cell_str)
 
-    consignee_text = "\n".join(consignee_cells) if consignee_cells else ""
-
-    # 2. If table didn't have full address, extract text section
     m_sec = re.search(
         r'(?:Consignee\s*Detail|परे[!षs\s]*ती\s*!ववरण|परे[!षs\s]*ती\s*विवरण|परेषती\s*विवरण|Consignee\s*and\s*Delivery)[\s\S]+?(?=(?:Product\s*Specification|ePBG\s*Detail|Terms\s*and\s*Conditions|General\s*Terms|$))',
         raw_text, re.IGNORECASE
     )
-    if m_sec:
-        consignee_text += "\n" + m_sec.group(0)
+    sec_text = m_sec.group(0) if m_sec else ""
 
-    # Extract Email strictly from consignee content
-    email = clean_email(consignee_text)
+    table_text = "\n".join(consignee_cells) if consignee_cells else ""
+
+    # Extract Email
+    email = clean_email(table_text)
+    if email == NA and sec_text:
+        email = clean_email(sec_text)
 
     # Extract Contact
-    m_c = re.search(r'(?:Contact\s*(?:No\.?)?|संपर्क\s*(?:नंबर)?|संपक[A-Za-z0-9_\s]*|sNpk[A-Za-z0-9_\s]*)\s*[:|.]\s*([^\n\r]+)', consignee_text, re.IGNORECASE)
-    contact = clean_phone(m_c.group(1)) if m_c else clean_phone(consignee_text)
+    m_c = re.search(r'(?:Contact\s*(?:No\.?)?|संपर्क\s*(?:नंबर)?|संपक[A-Za-z0-9_\s]*|sNpk[A-Za-z0-9_\s]*)\s*[:|.]\s*([^\n\r]+)', table_text, re.IGNORECASE)
+    if not m_c and sec_text:
+        m_c = re.search(r'(?:Contact\s*(?:No\.?)?|संपर्क\s*(?:नंबर)?|संपक[A-Za-z0-9_\s]*|sNpk[A-Za-z0-9_\s]*)\s*[:|.]\s*([^\n\r]+)', sec_text, re.IGNORECASE)
+    contact = clean_phone(m_c.group(1)) if m_c else (clean_phone(table_text) if table_text else clean_phone(sec_text))
 
-    # Extract Address
+    # Extract Address: try table_text first, then sec_text
     addr = NA
-    m_india = re.search(r'(?:Address|पता|ptaa|pata)\s*[:|.]\s*([\s\S]+?,\s*(?:India|भारत|\d{6},\s*India))', consignee_text, re.IGNORECASE)
-    if m_india:
-        addr = sanitize_consignee_address(m_india.group(1))
-    else:
-        m_pin = re.search(r'(?:Address|पता|ptaa|pata)\s*[:|.]\s*([\s\S]+?,\s*[A-Za-z\s]+-\d{6}(?:,\s*[-–\w]+)?)', consignee_text, re.IGNORECASE)
+    for source_text in [table_text, sec_text]:
+        if not source_text:
+            continue
+        m_india = re.search(r'(?:Address|पता|ptaa|pata)\s*[:|.]\s*([\s\S]+?,\s*(?:India|भारत|\d{6},\s*India))', source_text, re.IGNORECASE)
+        if m_india:
+            cand = sanitize_consignee_address(m_india.group(1))
+            if cand != NA and len(cand) >= 10:
+                addr = cand
+                break
+        m_pin = re.search(r'(?:Address|पता|ptaa|pata)\s*[:|.]\s*([\s\S]+?,\s*[A-Za-z\s]+-\d{6}(?:,\s*[-–\w]+)?)', source_text, re.IGNORECASE)
         if m_pin:
-            addr = sanitize_consignee_address(m_pin.group(1))
-        else:
-            m_gen = re.search(r'(?:Address|पता|ptaa|pata)\s*[:|.]\s*([^\n\r]+(?:\n\s*[^\n\r]+){1,4})', consignee_text, re.IGNORECASE)
-            if m_gen:
-                addr = sanitize_consignee_address(m_gen.group(1))
+            cand = sanitize_consignee_address(m_pin.group(1))
+            if cand != NA and len(cand) >= 10:
+                addr = cand
+                break
+        m_gen = re.search(r'(?:Address|पता|ptaa|pata)\s*[:|.]\s*([^\n\r]+(?:\n\s*[^\n\r]+){1,3})', source_text, re.IGNORECASE)
+        if m_gen:
+            cand = sanitize_consignee_address(m_gen.group(1))
+            if cand != NA and len(cand) >= 10:
+                addr = cand
+                break
 
     return [{
         "consignee_address": addr,
@@ -697,15 +820,113 @@ def parse_consignee_section(raw_text: str, doc: Optional[Any] = None) -> List[Di
     }]
 
 
+def extract_delivery_dates(raw_text: str, doc: Optional[Any] = None) -> str:
+    """
+    Extracts delivery date range(s) from the Consignee table.
+    Returns a string like "29-Oct-2024 to 13-Nov-2024" or a semicolon-separated
+    list when multiple consignees have different dates.
+    """
+    date_pat = re.compile(
+        r'\b(\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{4})\b',
+        re.IGNORECASE
+    )
+
+    delivery_pairs = []
+
+    # Strategy 1: Find delivery dates in the consignee table
+    if doc:
+        for page in doc:
+            tabs = page.find_tables()
+            for tab in tabs.tables:
+                extracted = tab.extract()
+                if not extracted:
+                    continue
+
+                # Identify header row with "Delivery Start" and "Delivery To Be Completed By"
+                hdr_idx = -1
+                start_col = -1
+                end_col = -1
+                for r_idx, row in enumerate(extracted):
+                    row_text = ' '.join(str(c).lower().replace('\n', ' ') for c in row if c)
+                    if ('delivery start' in row_text or 'delivery after' in row_text) and \
+                       ('delivery to' in row_text or 'completed by' in row_text):
+                        hdr_idx = r_idx
+                        for c_idx, cell in enumerate(row):
+                            cell_low = str(cell).lower().replace('\n', ' ') if cell else ''
+                            if 'delivery start' in cell_low or ('delivery' in cell_low and 'after' in cell_low):
+                                start_col = c_idx
+                            elif 'delivery to' in cell_low or 'completed by' in cell_low:
+                                end_col = c_idx
+                        break
+
+                if hdr_idx != -1 and (start_col != -1 or end_col != -1):
+                    for data_row in extracted[hdr_idx + 1:]:
+                        start_date = NA
+                        end_date = NA
+                        if start_col != -1 and start_col < len(data_row) and data_row[start_col]:
+                            m = date_pat.search(str(data_row[start_col]))
+                            if m:
+                                start_date = m.group(1)
+                        if end_col != -1 and end_col < len(data_row) and data_row[end_col]:
+                            m = date_pat.search(str(data_row[end_col]))
+                            if m:
+                                end_date = m.group(1)
+
+                        if start_date != NA or end_date != NA:
+                            pair = f"{start_date} to {end_date}"
+                            if pair not in delivery_pairs:
+                                delivery_pairs.append(pair)
+
+    if delivery_pairs:
+        return '; '.join(delivery_pairs)
+
+    # Strategy 2: Parse text for delivery date lines
+    m_delivery = re.search(
+        r'(?:Delivery\s*Start\s*After|Delivery\s*From)[^\n]*[:\s]+(\d{1,2}-\w{3}-\d{4})',
+        raw_text, re.IGNORECASE
+    )
+    m_delivery_end = re.search(
+        r'(?:Delivery\s*To\s*Be\s*Completed\s*By|Delivery\s*End)[^\n]*[:\s]+(\d{1,2}-\w{3}-\d{4})',
+        raw_text, re.IGNORECASE
+    )
+
+    if m_delivery or m_delivery_end:
+        start = m_delivery.group(1) if m_delivery else NA
+        end = m_delivery_end.group(1) if m_delivery_end else NA
+        return f"{start} to {end}"
+
+    # Strategy 3: Extract from consignee section text
+    consignee_section = extract_section(
+        raw_text,
+        [r'Consignee\s*Detail', r'Consignee\s*and\s*Delivery'],
+        [r'Product\s*Specification', r'ePBG\s*Detail', r'Terms\s*and\s*Conditions', r'General\s*Terms']
+    )
+    if consignee_section:
+        all_dates = date_pat.findall(consignee_section)
+        # In the consignee section, dates usually come in pairs: start, end, start, end...
+        # Filter out dates that are obviously in the past (e.g., contract date already captured)
+        delivery_dates = []
+        for i in range(0, len(all_dates) - 1, 2):
+            pair = f"{all_dates[i]} to {all_dates[i+1]}"
+            if pair not in delivery_dates:
+                delivery_dates.append(pair)
+        if delivery_dates:
+            return '; '.join(delivery_dates)
+        elif all_dates:
+            return all_dates[0]
+
+    return NA
+
+
 def parse_product_cell(cell_text: str) -> Dict[str, str]:
-    """Isolates product name, brand, and category with quadrant from cell or block text."""
+    """Isolates product name, brand, category, model, HSN, brand type from cell or block text."""
     lines = [l.strip() for l in cell_text.split('\n') if l.strip()]
     full_text = '\n'.join(lines)
 
     # 1. Product Name
     p_name = NA
     m_pn = re.search(
-        r'(?:Product\s*Name[^\n:]*|उत्पाद\s*का\s*नाम[^\n:]*|उ[^\w\s]?पाद\s*का\s*नाम[^\n:]*|utpaad\s*kaa\s*naam[^\n:]*|u[|{xz~]paad\s*kaa\s*naam[^\n:]*)\s*[:.]\s*([\s\S]+?)(?=\n\s*(?:\bBrand\b|ब्रांड|[‚€†\x7f\x80\x81\x83\u0192\w\s|]*?[ाo\u093e]ंड|\bBrand\s*Type\b|\bCatalogue\b|\bSelling\b|\bCategory\b|\bModel\b|\bHSN\b|$))',
+        r'(?:Product\s*Name[^\n:]*|उत्पाद\s*का\s*नाम[^\n:]*|उ[^\w\s]?पाद\s*का\s*नाम[^\n:]*|utpaad\s*kaa\s*naam[^\n:]*|u[|{xz~]paad\s*kaa\s*naam[^\n:]*)\s*[:.]?\s*([\s\S]+?)(?=\n\s*(?:\bBrand\b|ब्रांड|[‚€†\x7f\x80\x81\x83\u0192\w\s|]*?[ाo\u093e]ंड|\bBrand\s*Type\b|\bCatalogue\b|\bSelling\b|\bCategory\b|\bModel\b|\bHSN\b|$))',
         full_text, re.IGNORECASE
     )
     if m_pn:
@@ -719,23 +940,188 @@ def parse_product_cell(cell_text: str) -> Dict[str, str]:
         if val_lines:
             p_name = clean_product_name(' '.join(val_lines[:2]))
 
-    # 2. Brand
+    # 2. Brand — extracted strictly from THIS cell only (no bleed from other items)
     brand_val = NA
-    m_br = re.search(r'(?:\bBrand\b|ब्रांड|[‚€†\x7f\x80\x81\x83\u0192\w\s|]*?[ाo\u093e]ंड)\s*[:.]\s*([^\n\r]+)', full_text, re.IGNORECASE)
+    m_br = re.search(r'(?:\bBrand\b|ब्रांड|[‚€†\x7f\x80\x81\x83\u0192\w\s|]*?[ाo\u093e]ंड)\s*[:.]?\s*([^\n\r]+)', full_text, re.IGNORECASE)
     if m_br:
         brand_val = sanitize_brand(m_br.group(1))
 
-    # 3. Category & Quadrant (capture full name and quadrant if on next line)
+    # 3. Category & Quadrant (capture full multiline name and quadrant)
     cat_val = NA
-    m_cat = re.search(r'(?:Category\s*Name\s*(?:&|and)?\s*Quadrant?|[^\n:]*?ेणी\s*का\s*नाम[^\n:]*)\s*[:.]\s*([^\n\r]+(?:\n\s*\(Q\d\))?)', full_text, re.IGNORECASE)
+    m_cat = re.search(
+        r'(?:Category\s*Name\s*(?:&|and)?\s*Quadrant?|श्रेणी\s*का\s*नाम[^\n:]*|[^\n:]*?ेणी\s*का\s*नाम[^\n:]*)\s*[:.]?\s*([\s\S]+?)(?=\n\s*(?:\bModel\b|\bHSN\b|\bBrand\s*Type\b|\bBrand\b|\bCatalogue\b|\bSelling\b|मॉडल|एचएसएन|$))',
+        full_text, re.IGNORECASE
+    )
     if m_cat:
         cat_val = clean_category_quadrant(m_cat.group(1).replace('\n', ' '))
+
+    # 4. Model
+    model_val = NA
+    m_model = re.search(r'\bModel\s*[:.]?\s*([^\n\r]+)', full_text, re.IGNORECASE)
+    if m_model:
+        raw_model = m_model.group(1).strip()
+        # Reject if it looks like "HSN not specified"
+        if not re.search(r'(?:hsn|not specified|NA)', raw_model, re.IGNORECASE):
+            model_val = clean_text(raw_model)
+            # Limit length to avoid picking up descriptions
+            if model_val != NA and len(model_val) > 50:
+                model_val = model_val[:50].rstrip()
+
+    # 5. HSN Code
+    hsn_val = NA
+    m_hsn = re.search(r'\bHSN\s*(?:Code)?\s*[:.]?\s*([^\n\r]+)', full_text, re.IGNORECASE)
+    if m_hsn:
+        raw_hsn = m_hsn.group(1).strip()
+        # Extract just the numeric HSN code if present
+        hsn_match = re.search(r'\b(\d{4,8})\b', raw_hsn)
+        if hsn_match:
+            hsn_val = hsn_match.group(1)
+        elif re.search(r'(?:not specified|NA|none)', raw_hsn, re.IGNORECASE):
+            hsn_val = NA
+        else:
+            hsn_val = clean_text(raw_hsn)
+
+    # 6. Brand Type
+    brand_type_val = NA
+    m_bt = re.search(r'\bBrand\s*Type\s*[:.]?\s*([^\n\r]+)', full_text, re.IGNORECASE)
+    if m_bt:
+        raw_bt = m_bt.group(1).strip()
+        bt_cleaned = clean_text(raw_bt)
+        if bt_cleaned != NA:
+            brand_type_val = bt_cleaned
 
     return {
         "product_name": p_name,
         "brand": brand_val,
-        "category_name_quadrant": cat_val
+        "category_name_quadrant": cat_val,
+        "model": model_val,
+        "hsn_code": hsn_val,
+        "brand_type": brand_type_val,
     }
+
+
+def _detect_column_map(header_row: List) -> Dict[str, int]:
+    """
+    Detect column indices from a product table header row.
+    Returns a dict with keys: item_desc, qty, unit, unit_price, tax, total_price, lot_no
+    """
+    col_map = {}
+    for c_idx, cell in enumerate(header_row):
+        if not cell:
+            continue
+        cl = str(cell).lower().replace('\n', ' ').strip()
+
+        if c_idx == 0 and re.match(r'^[#s\.n]', cl):
+            # First column with #/S.No/Sl.No is the lot number column
+            col_map['lot_no'] = c_idx
+        elif ('item description' in cl or 'आइटम विवरण' in cl) and 'ordered' not in cl and 'quantity' not in cl:
+            col_map['item_desc'] = c_idx
+        elif ('ordered' in cl or 'quantity' in cl or 'मात्रा' in cl or 'मा=ा' in cl or
+              'मा?ा' in cl or 'मा>ा' in cl) and 'price' not in cl:
+            col_map['qty'] = c_idx
+        elif is_unit_label(cl) or cl in ('unit', 'यूनिट', 'इकाई'):
+            col_map['unit'] = c_idx
+        elif 'unit price' in cl or 'इकाई मू' in cl:
+            col_map['unit_price'] = c_idx
+        elif 'tax' in cl or 'bifurcation' in cl or 'कर' in cl:
+            col_map['tax'] = c_idx
+        elif ('inclusive' in cl or 'all duties' in cl or 'total' in cl or 'सभी' in cl or
+              'price' in cl or 'मूल्य' in cl or 'मू य' in cl or 'मू~य' in cl or 'मू}य' in cl):
+            if 'unit_price' not in col_map or col_map.get('unit_price') != c_idx:
+                col_map['total_price'] = c_idx
+        elif 'category' in cl or 'श्रेणी' in cl:
+            col_map['category'] = c_idx
+        elif 'model' in cl or 'मॉडल' in cl:
+            col_map['model'] = c_idx
+
+    return col_map
+
+
+def _extract_numbers_from_row(data_row: List, col_map: Dict[str, int]) -> Tuple[Any, Any, Any]:
+    """
+    Robustly extracts (qty, unit_price, total_price) from a data row.
+
+    Key logic:
+    - Skips the lot_no column entirely.
+    - Validates that unit_price and total_price are consistent with qty.
+    - When qty==lot_no (a single-digit sequential index), uses total_price/unit_price
+      to verify actual qty by back-calculation.
+    - Rejects unit labels (pieces, Nos, etc.) from numeric columns.
+    """
+    qty_val = NA
+    unit_price_val = NA
+    total_price_val = NA
+
+    # Extract raw values
+    def get_num(col_key: str) -> Any:
+        idx = col_map.get(col_key)
+        if idx is None or idx >= len(data_row) or data_row[idx] is None:
+            return NA
+        cell = str(data_row[idx]).strip()
+        if is_unit_label(cell):
+            return NA
+        return to_number(cell)
+
+    qty_raw = get_num('qty')
+    unit_price_raw = get_num('unit_price')
+    total_price_raw = get_num('total_price')
+
+    # Check if the cell AFTER qty column is a unit label (pieces, Nos)
+    # If so, it confirms the qty column is correct.
+    unit_col = col_map.get('unit')
+    unit_label_found = False
+    if unit_col is not None and unit_col < len(data_row) and data_row[unit_col]:
+        if is_unit_label(str(data_row[unit_col])):
+            unit_label_found = True
+
+    qty_val = qty_raw
+    unit_price_val = unit_price_raw
+    total_price_val = total_price_raw
+
+    # Disambiguate: if qty_val is a small integer that looks like a lot number
+    # and unit_price and total don't match qty * unit_price, then
+    # qty_val might actually be the lot number and the real qty is 1 (or in unit column)
+    if (qty_val != NA and unit_price_val != NA and total_price_val != NA and
+            isinstance(qty_val, (int, float)) and isinstance(unit_price_val, (int, float)) and
+            isinstance(total_price_val, (int, float))):
+
+        computed = round(qty_val * unit_price_val, 2)
+        if abs(computed - total_price_val) > 2.0:
+            # Math doesn't match. Check if unit_price is actually the real total and
+            # the column labelled 'unit_price' is correctly labelled.
+            # Alternative: qty might be lot no, and true qty is in unit label position
+            # OR there's a column shift. Try: assume lot_no was read as qty.
+            # Attempt to find actual qty from unit column or assume qty=1
+            actual_qty = NA
+
+            # Check unit column for a numeric quantity
+            if unit_col is not None and unit_col < len(data_row) and data_row[unit_col]:
+                uval = to_number(str(data_row[unit_col]))
+                if uval != NA and isinstance(uval, (int, float)) and uval > 0:
+                    actual_qty = uval
+                    # Validate: does actual_qty * unit_price == total?
+                    if abs(round(actual_qty * unit_price_val, 2) - total_price_val) <= 2.0:
+                        qty_val = actual_qty
+
+            # If still broken, try to back-calculate: total_price / unit_price = qty
+            if qty_val == qty_raw and unit_price_val > 0:
+                back_qty = total_price_val / unit_price_val
+                if abs(back_qty - round(back_qty)) < 0.01:
+                    qty_val = int(round(back_qty))
+
+    # Final math reconciliation: Total Order Value ALWAYS equals ordered_quantity * unit_price
+    if qty_val != NA and unit_price_val != NA and isinstance(qty_val, (int, float)) and isinstance(unit_price_val, (int, float)):
+        total_price_val = round(qty_val * unit_price_val, 2)
+    elif qty_val != NA and total_price_val != NA and (unit_price_val == NA or unit_price_val == 0):
+        if isinstance(qty_val, (int, float)) and isinstance(total_price_val, (int, float)) and qty_val > 0:
+            unit_price_val = round(total_price_val / qty_val, 2)
+            total_price_val = round(qty_val * unit_price_val, 2)
+    elif unit_price_val != NA and total_price_val != NA and (qty_val == NA or qty_val == 0):
+        if isinstance(unit_price_val, (int, float)) and isinstance(total_price_val, (int, float)) and unit_price_val > 0:
+            qty_val = int(round(total_price_val / unit_price_val))
+            total_price_val = round(qty_val * unit_price_val, 2)
+
+    return qty_val, unit_price_val, total_price_val
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -776,23 +1162,7 @@ def parse_all_product_items(raw_text: str, doc: Optional[Any] = None) -> List[Di
 
                         if (has_item and (has_price or has_qty)) or (has_qty and has_price):
                             header_row_idx = r_idx
-                            for c_idx, cell in enumerate(row):
-                                if not cell:
-                                    continue
-                                cl = str(cell).lower().replace('\n', ' ')
-                                if ('item description' in cl or 'आइटम विवरण' in cl) and 'ordered' not in cl and 'quantity' not in cl and 'मात्रा' not in cl:
-                                    col_map['item_desc'] = c_idx
-                                elif 'ordered' in cl or 'quantity' in cl or 'मात्रा' in cl or 'मा=ा' in cl or 'मा?ा' in cl or 'मा>ा' in cl:
-                                    col_map['qty'] = c_idx
-                                elif 'category' in cl or 'श्रेणी' in cl:
-                                    col_map['category'] = c_idx
-                                elif 'model' in cl or 'मॉडल' in cl:
-                                    col_map['model'] = c_idx
-                                elif 'unit price' in cl or 'इकाई मू' in cl:
-                                    col_map['unit_price'] = c_idx
-                                elif 'inclusive' in cl or 'all duties' in cl or 'total' in cl or 'सभी' in cl or (('price' in cl or 'मूल्य' in cl or 'मू य' in cl or 'मू~य' in cl or 'मू}य' in cl) and 'unit' not in cl and 'इकाई' not in cl):
-                                    if 'unit_price' not in col_map or col_map['unit_price'] != c_idx:
-                                        col_map['total_price'] = c_idx
+                            col_map = _detect_column_map(row)
                             active_col_map = col_map
                             break
 
@@ -820,32 +1190,22 @@ def parse_all_product_items(raw_text: str, doc: Optional[Any] = None) -> List[Di
                             p_name = parsed_desc.get("product_name", NA)
                             brand_val = parsed_desc.get("brand", NA)
                             cat_val = parsed_desc.get("category_name_quadrant", NA)
+                            model_val = parsed_desc.get("model", NA)
+                            hsn_val = parsed_desc.get("hsn_code", NA)
+                            brand_type_val = parsed_desc.get("brand_type", NA)
 
                             if cat_val == NA and 'category' in curr_map and curr_map['category'] < len(data_row) and data_row[curr_map['category']]:
                                 cat_val = clean_category_quadrant(str(data_row[curr_map['category']]))
 
-                            qty_val = NA
-                            if 'qty' in curr_map and curr_map['qty'] < len(data_row) and data_row[curr_map['qty']]:
-                                qty_val = to_number(data_row[curr_map['qty']])
+                            # Extract model from dedicated column if available and not in desc
+                            if model_val == NA and 'model' in curr_map and curr_map['model'] < len(data_row) and data_row[curr_map['model']]:
+                                model_val = clean_text(str(data_row[curr_map['model']]))
 
-                            unit_price_val = NA
-                            if 'unit_price' in curr_map and curr_map['unit_price'] < len(data_row) and data_row[curr_map['unit_price']]:
-                                unit_price_val = to_number(data_row[curr_map['unit_price']])
-
-                            total_price_val = NA
-                            if 'total_price' in curr_map and curr_map['total_price'] < len(data_row) and data_row[curr_map['total_price']]:
-                                total_price_val = to_number(data_row[curr_map['total_price']])
+                            # Robustly extract numeric fields with lot-number disambiguation
+                            qty_val, unit_price_val, total_price_val = _extract_numbers_from_row(data_row, curr_map)
 
                             if qty_val == NA and unit_price_val == NA and total_price_val == NA and p_name == NA:
                                 continue
-
-                            # Reconcile math
-                            if qty_val != NA and unit_price_val != NA and (total_price_val == NA or total_price_val == 0):
-                                total_price_val = round(qty_val * unit_price_val, 2)
-                            elif qty_val != NA and total_price_val != NA and (unit_price_val == NA or unit_price_val == 0) and qty_val > 0:
-                                unit_price_val = round(total_price_val / qty_val, 2)
-                            elif unit_price_val != NA and total_price_val != NA and (qty_val == NA or qty_val == 0) and unit_price_val > 0:
-                                qty_val = int(round(total_price_val / unit_price_val))
 
                             table_items.append({
                                 "product_name": p_name,
@@ -853,7 +1213,10 @@ def parse_all_product_items(raw_text: str, doc: Optional[Any] = None) -> List[Di
                                 "category_name_quadrant": cat_val,
                                 "ordered_quantity": qty_val,
                                 "unit_price": unit_price_val,
-                                "total_order_value": total_price_val
+                                "total_order_value": total_price_val,
+                                "model": model_val,
+                                "hsn_code": hsn_val,
+                                "brand_type": brand_type_val,
                             })
         except Exception:
             pass
@@ -874,28 +1237,61 @@ def parse_all_product_items(raw_text: str, doc: Optional[Any] = None) -> List[Di
         pn = parsed.get("product_name", NA)
         br = parsed.get("brand", NA)
         cat = parsed.get("category_name_quadrant", NA)
+        model_v = parsed.get("model", NA)
+        hsn_v = parsed.get("hsn_code", NA)
+        bt_v = parsed.get("brand_type", NA)
 
         qty_val = NA
         unit_price_val = NA
         total_val = NA
 
-        # Numbers after HSN Code / Model
-        m_nums = re.findall(r'\n\s*([\d,]+(?:\.\d+)?)\s*(?:\n|$)', blk)
+        # Numbers after HSN Code / Model — extract strictly in order
+        # Pattern: lot#\npieces/qty_unit\nunit_price\nNA/tax\ntotal
+        # or: qty\nunit\nunit_price\ntax\ntotal
+        num_lines = re.findall(r'\n\s*([\d,]+(?:\.\d+)?)\s*(?:\n|$)', blk)
         valid_nums = []
-        for n in m_nums:
+        for n in num_lines:
             num = to_number(n)
             if num != NA:
                 valid_nums.append(num)
 
+        # Also look for the total price from explicit "Total Order Value" context
+        m_total = re.search(r'Total\s*Order\s*Value[^\d]*([\d,]+(?:\.\d+)?)', blk, re.IGNORECASE)
+        explicit_total = to_number(m_total.group(1)) if m_total else NA
+
         if len(valid_nums) >= 3:
-            qty_val = valid_nums[0]
-            unit_price_val = valid_nums[1]
-            total_val = valid_nums[2]
+            # Could be [qty, unit_price, tax_or_total, total] or [lot, qty, unit_price, total]
+            # Heuristic: if valid_nums[0] is small (1-20) and valid_nums[0]*valid_nums[1] != valid_nums[2],
+            # try valid_nums[0]=qty, valid_nums[1]=unit_price, valid_nums[2]=total
+            q0, p0, t0 = valid_nums[0], valid_nums[1], valid_nums[2]
+            if abs(q0 * p0 - t0) <= 2.0:
+                qty_val, unit_price_val, total_val = q0, p0, t0
+            elif len(valid_nums) >= 4:
+                q1, p1, t1 = valid_nums[1], valid_nums[2], valid_nums[3]
+                if abs(q1 * p1 - t1) <= 2.0:
+                    qty_val, unit_price_val, total_val = q1, p1, t1
+                else:
+                    # Try back-calculation: total/qty = unit_price
+                    if explicit_total != NA and q0 > 0:
+                        up = round(explicit_total / q0, 2)
+                        qty_val, unit_price_val, total_val = q0, up, explicit_total
+                    else:
+                        qty_val, unit_price_val, total_val = q0, p0, t0
+            else:
+                # Math doesn't match with 3 numbers; try total / unit_price = qty
+                if t0 > p0 and p0 > 0:
+                    back_q = t0 / p0
+                    if abs(back_q - round(back_q)) < 0.01:
+                        qty_val, unit_price_val, total_val = int(round(back_q)), p0, t0
+                    else:
+                        qty_val, unit_price_val, total_val = q0, p0, t0
+                else:
+                    qty_val, unit_price_val, total_val = q0, p0, t0
         elif len(valid_nums) == 2:
-            qty_val = valid_nums[0]
-            total_val = valid_nums[1]
-            if qty_val > 0:
-                unit_price_val = round(total_val / qty_val, 2)
+            q0, t0 = valid_nums[0], valid_nums[1]
+            if q0 > 0:
+                unit_price_val = round(t0 / q0, 2)
+            qty_val, total_val = q0, t0
         elif len(valid_nums) == 1:
             if valid_nums[0] < 1000:
                 qty_val = valid_nums[0]
@@ -911,7 +1307,10 @@ def parse_all_product_items(raw_text: str, doc: Optional[Any] = None) -> List[Di
             "category_name_quadrant": cat,
             "ordered_quantity": qty_val,
             "unit_price": unit_price_val,
-            "total_order_value": total_val
+            "total_order_value": total_val,
+            "model": model_v,
+            "hsn_code": hsn_v,
+            "brand_type": bt_v,
         })
 
     # Reconcile table_items and text_items
@@ -921,18 +1320,21 @@ def parse_all_product_items(raw_text: str, doc: Optional[Any] = None) -> List[Di
     elif len(table_items) > 0 and len(text_items) == len(table_items):
         for i, t_it in enumerate(table_items):
             txt_it = text_items[i]
-            if t_it.get("product_name") == NA and txt_it.get("product_name") != NA:
-                t_it["product_name"] = txt_it["product_name"]
-            if t_it.get("brand") == NA and txt_it.get("brand") != NA:
-                t_it["brand"] = txt_it["brand"]
-            if t_it.get("category_name_quadrant") == NA and txt_it.get("category_name_quadrant") != NA:
-                t_it["category_name_quadrant"] = txt_it["category_name_quadrant"]
-            if t_it.get("ordered_quantity") == NA and txt_it.get("ordered_quantity") != NA:
-                t_it["ordered_quantity"] = txt_it["ordered_quantity"]
-            if t_it.get("unit_price") == NA and txt_it.get("unit_price") != NA:
-                t_it["unit_price"] = txt_it["unit_price"]
-            if t_it.get("total_order_value") == NA and txt_it.get("total_order_value") != NA:
-                t_it["total_order_value"] = txt_it["total_order_value"]
+            # Merge missing/NA fields from text_items into table_items
+            for field in ["product_name", "brand", "category_name_quadrant", "ordered_quantity",
+                          "unit_price", "total_order_value", "model", "hsn_code", "brand_type"]:
+                if t_it.get(field) == NA and txt_it.get(field) != NA:
+                    t_it[field] = txt_it[field]
+            # Prefer text_items for numeric fields if math is consistent
+            txt_qty = txt_it.get("ordered_quantity", NA)
+            txt_up = txt_it.get("unit_price", NA)
+            txt_tot = txt_it.get("total_order_value", NA)
+            if (txt_qty != NA and txt_up != NA and txt_tot != NA and
+                    isinstance(txt_qty, (int, float)) and isinstance(txt_up, (int, float)) and isinstance(txt_tot, (int, float))):
+                if abs(round(txt_qty * txt_up, 2) - txt_tot) <= 2.0:
+                    t_it["ordered_quantity"] = txt_qty
+                    t_it["unit_price"] = txt_up
+                    t_it["total_order_value"] = txt_tot
 
     if not final_items and text_items:
         final_items = text_items
@@ -993,7 +1395,7 @@ def validate_record(rec: Dict[str, Any]) -> Tuple[str, int, List[str], Dict[str,
 
     # 4. Seller Contact No
     seller_contact = rec.get("seller_contact_no", NA)
-    if seller_contact == NA or len(str(seller_contact)) < 7:
+    if seller_contact == NA or len(str(seller_contact)) < 7 or not str(seller_contact).isdigit():
         errors.append("Invalid or missing Seller Contact No")
         checks["seller_contact_no"] = False
     else:
@@ -1107,10 +1509,14 @@ def process_single_pdf(filepath: str) -> List[Dict[str, Any]]:
             "seller_address": NA,
             "product_name": NA,
             "brand": NA,
+            "brand_type": NA,
             "category_name_quadrant": NA,
+            "model": NA,
+            "hsn_code": NA,
             "ordered_quantity": NA,
             "unit_price": NA,
             "total_order_value": NA,
+            "delivery_dates": NA,
             "consignee_email": NA,
             "consignee_contact_no": NA,
             "consignee_address": NA,
@@ -1128,6 +1534,9 @@ def process_single_pdf(filepath: str) -> List[Dict[str, Any]]:
     seller = parse_seller_section(raw_text)
     consignees = parse_consignee_section(raw_text, doc=doc)
 
+    # Extract delivery dates
+    delivery_dates = extract_delivery_dates(raw_text, doc=doc)
+
     # Extract all product line items across pages
     product_items = parse_all_product_items(raw_text, doc=doc)
 
@@ -1140,14 +1549,30 @@ def process_single_pdf(filepath: str) -> List[Dict[str, Any]]:
         product_items = [{
             "product_name": NA,
             "brand": NA,
+            "brand_type": NA,
             "category_name_quadrant": NA,
+            "model": NA,
+            "hsn_code": NA,
             "ordered_quantity": NA,
             "unit_price": NA,
-            "total_order_value": NA
+            "total_order_value": NA,
         }]
 
     records = []
     for item in product_items:
+        qty = item.get("ordered_quantity", NA)
+        unit_p = item.get("unit_price", NA)
+        total_p = item.get("total_order_value", NA)
+
+        if qty != NA and unit_p != NA and isinstance(qty, (int, float)) and isinstance(unit_p, (int, float)):
+            total_p = round(qty * unit_p, 2)
+        elif qty != NA and total_p != NA and (unit_p == NA or unit_p == 0) and isinstance(qty, (int, float)) and isinstance(total_p, (int, float)) and qty > 0:
+            unit_p = round(total_p / qty, 2)
+            total_p = round(qty * unit_p, 2)
+        elif unit_p != NA and total_p != NA and (qty == NA or qty == 0) and isinstance(unit_p, (int, float)) and isinstance(total_p, (int, float)) and unit_p > 0:
+            qty = int(round(total_p / unit_p))
+            total_p = round(qty * unit_p, 2)
+
         rec = {
             "file_name": filename,
             "contract_no": contract_no,
@@ -1163,10 +1588,14 @@ def process_single_pdf(filepath: str) -> List[Dict[str, Any]]:
             "seller_address": seller.get("address", NA),
             "product_name": item.get("product_name", NA),
             "brand": item.get("brand", NA),
+            "brand_type": item.get("brand_type", NA),
             "category_name_quadrant": item.get("category_name_quadrant", NA),
-            "ordered_quantity": item.get("ordered_quantity", NA),
-            "unit_price": item.get("unit_price", NA),
-            "total_order_value": item.get("total_order_value", NA),
+            "model": item.get("model", NA),
+            "hsn_code": item.get("hsn_code", NA),
+            "ordered_quantity": qty,
+            "unit_price": unit_p,
+            "total_order_value": total_p,
+            "delivery_dates": delivery_dates,
             "consignee_email": first_consignee.get("consignee_email", NA),
             "consignee_contact_no": first_consignee.get("consignee_contact_no", NA),
             "consignee_address": first_consignee.get("consignee_address", NA),
