@@ -51,6 +51,10 @@ flowchart TD
 - **Problem**: Need to ensure `total_order_value` is never guessed and strictly equals $\text{Ordered Quantity} \times \text{Unit Price}$.
 - **Solution**: Enforced `total_order_value = round(ordered_quantity * unit_price, 2)` across `_extract_numbers_from_row`, `parse_all_product_items`, and `process_single_pdf`.
 
+#### E. Strict Brand Extraction (Preserve Brand NA & Zero Spec Bleed)
+- **Problem**: In contracts with unbranded line items (`Brand : NA`), a global fallback previously scanned subsequent specification headings and falsely populated the brand with words like `Two`, `Three`, `Four` (from `Two Wheel`, `Three standing`, etc.) or other items' brand names.
+- **Solution**: Removed the global document specification title search from [extractor.py](file:///c:/Users/Sumit/Desktop/Sumit_Data/PDF%20TO%20EXCEL/backend/extractor.py). When the PDF lists `Brand : NA` or unbranded, the field is strictly preserved as `"NA"` with zero bleed.
+
 ---
 
 ### 3. Verification & Test Execution

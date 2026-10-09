@@ -1042,19 +1042,19 @@ def _extract_numbers_from_row(data_row: List, col_map: Dict[str, int]) -> Tuple[
     Robustly extracts (qty, unit_price, total_price) from a data row.
 
     Key logic:
-    - Skips the lot_no column entirely.
+    - First attempts standard column-mapped lookup.
+    - If column-mapped lookup fails or encounters column-shift/spacer column variation across pages,
+      scans sequential non-empty trailing cells following the item description cell.
     - Validates that unit_price and total_price are consistent with qty.
-    - When qty==lot_no (a single-digit sequential index), uses total_price/unit_price
-      to verify actual qty by back-calculation.
     - Rejects unit labels (pieces, Nos, etc.) from numeric columns.
     """
     qty_val = NA
     unit_price_val = NA
     total_price_val = NA
 
-    # Extract raw values
+    # 1. Direct Column Mapped Extraction
     def get_num(col_key: str) -> Any:
-        idx = col_map.get(col_key)
+        idx = col_map.get(col_key) if col_map else None
         if idx is None or idx >= len(data_row) or data_row[idx] is None:
             return NA
         cell = str(data_row[idx]).strip()
@@ -1066,44 +1066,66 @@ def _extract_numbers_from_row(data_row: List, col_map: Dict[str, int]) -> Tuple[
     unit_price_raw = get_num('unit_price')
     total_price_raw = get_num('total_price')
 
-    # Check if the cell AFTER qty column is a unit label (pieces, Nos)
-    # If so, it confirms the qty column is correct.
-    unit_col = col_map.get('unit')
-    unit_label_found = False
-    if unit_col is not None and unit_col < len(data_row) and data_row[unit_col]:
-        if is_unit_label(str(data_row[unit_col])):
-            unit_label_found = True
+    unit_col = col_map.get('unit') if col_map else None
+
+    # 2. Sequential Trailing Cell Fallback (Handles variable spacer 'None' columns across page breaks)
+    # If standard mapped extraction produced NA or invalid numbers, scan non-empty cells after description
+    desc_idx = col_map.get('item_desc', 1) if col_map else 1
+    if desc_idx >= len(data_row) or (desc_idx == 1 and len(data_row) > 1 and not any(k in str(data_row[1]).lower() for k in ['product', 'उत्पाद', 'उ{', 'उ|', 'उx', 'उz', 'brand', 'ब्रांड', 'category'])):
+        for ci, c in enumerate(data_row):
+            if c and any(k in str(c).lower() for k in ['product', 'उत्पाद', 'उ{', 'उ|', 'उx', 'उz', 'brand', 'ब्रांड', 'category', 'catalogue', 'model', 'hsn']):
+                desc_idx = ci
+                break
+
+    trailing_cells = [str(c).strip() for c in data_row[desc_idx + 1:] if c is not None and str(c).strip() != '']
+    if (qty_raw == NA or unit_price_raw == NA or (unit_price_raw == 1 and qty_raw == NA)) and len(trailing_cells) >= 2:
+        # Extract numeric candidates and unit from trailing cells
+        cand_nums = []
+        for t_cell in trailing_cells:
+            if is_unit_label(t_cell):
+                continue
+            num = to_number(t_cell)
+            if num != NA and isinstance(num, (int, float)):
+                cand_nums.append(num)
+
+        if len(cand_nums) >= 3:
+            # [qty, unit_price, total_price] or [qty, unit_price, tax, total_price]
+            q0, p0, t0 = cand_nums[0], cand_nums[1], cand_nums[-1]
+            if abs(q0 * p0 - t0) <= 2.0 or (t0 >= p0 and p0 > 0):
+                qty_raw, unit_price_raw, total_price_raw = q0, p0, t0
+            else:
+                qty_raw, unit_price_raw, total_price_raw = q0, p0, t0
+        elif len(cand_nums) == 2:
+            q0, t0 = cand_nums[0], cand_nums[1]
+            if q0 > 0 and t0 >= q0:
+                qty_raw = q0
+                total_price_raw = t0
+                unit_price_raw = round(t0 / q0, 2)
+            else:
+                qty_raw, unit_price_raw = q0, t0
+        elif len(cand_nums) == 1:
+            if cand_nums[0] <= 100:
+                qty_raw = cand_nums[0]
+            else:
+                total_price_raw = cand_nums[0]
 
     qty_val = qty_raw
     unit_price_val = unit_price_raw
     total_price_val = total_price_raw
 
-    # Disambiguate: if qty_val is a small integer that looks like a lot number
-    # and unit_price and total don't match qty * unit_price, then
-    # qty_val might actually be the lot number and the real qty is 1 (or in unit column)
+    # Disambiguate & Math Validation
     if (qty_val != NA and unit_price_val != NA and total_price_val != NA and
             isinstance(qty_val, (int, float)) and isinstance(unit_price_val, (int, float)) and
             isinstance(total_price_val, (int, float))):
 
         computed = round(qty_val * unit_price_val, 2)
         if abs(computed - total_price_val) > 2.0:
-            # Math doesn't match. Check if unit_price is actually the real total and
-            # the column labelled 'unit_price' is correctly labelled.
-            # Alternative: qty might be lot no, and true qty is in unit label position
-            # OR there's a column shift. Try: assume lot_no was read as qty.
-            # Attempt to find actual qty from unit column or assume qty=1
-            actual_qty = NA
-
-            # Check unit column for a numeric quantity
             if unit_col is not None and unit_col < len(data_row) and data_row[unit_col]:
                 uval = to_number(str(data_row[unit_col]))
                 if uval != NA and isinstance(uval, (int, float)) and uval > 0:
-                    actual_qty = uval
-                    # Validate: does actual_qty * unit_price == total?
-                    if abs(round(actual_qty * unit_price_val, 2) - total_price_val) <= 2.0:
-                        qty_val = actual_qty
+                    if abs(round(uval * unit_price_val, 2) - total_price_val) <= 2.0:
+                        qty_val = uval
 
-            # If still broken, try to back-calculate: total_price / unit_price = qty
             if qty_val == qty_raw and unit_price_val > 0:
                 back_qty = total_price_val / unit_price_val
                 if abs(back_qty - round(back_qty)) < 0.01:
@@ -1128,20 +1150,127 @@ def _extract_numbers_from_row(data_row: List, col_map: Dict[str, int]) -> Tuple[
 # MULTI-PRODUCT ITEM PARSER
 # ──────────────────────────────────────────────────────────────────────────────
 
+# ──────────────────────────────────────────────────────────────────────────────
+# MULTI-PAGE ROW FUSION & CONTINUATION HELPERS
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _is_product_continuation_cell(cell_text: str) -> bool:
+    """
+    Returns True if a cell text looks like the 2nd-half continuation of a product row
+    (starts with Catalogue Status, Selling As, Category, Model, or HSN, without a new Product Name).
+    """
+    if not cell_text:
+        return False
+    cl = cell_text.strip().lower()
+    has_pn = any(k in cl for k in ['product name', 'उत्पाद का नाम', 'उ{पाद', 'उ|पाद', 'उxपाद', 'उzपाद', 'utpaad kaa naam'])
+    if has_pn:
+        return False
+    continuation_indicators = [
+        'catalogue status', 'कैटलॉग की स्थिति', 'selling as', 'कैसे बेचा जा रहा',
+        'category name', 'श्रेणी का नाम', 'quadrant', 'चतुर्थांश', 'model', 'मॉडल',
+        'hsn code', 'एचएसएन कोड', 'hsn'
+    ]
+    return any(k in cl for k in continuation_indicators)
+
+
+def _reconcile_and_fuse_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Post-extraction failsafe: detects any consecutive split rows across page breaks
+    where Item N has the Product Name/Brand (cut off at page bottom) and Item N+1
+    has the Category/Model/HSN/Quantity/Prices (started at top of next page).
+    Fuses them into a single 100% complete and consistent item.
+    """
+    if not items or len(items) <= 1:
+        return items
+
+    fused_items: List[Dict[str, Any]] = []
+    i = 0
+    while i < len(items):
+        curr = items[i]
+        curr_pn = curr.get("product_name", NA)
+        curr_qty = curr.get("ordered_quantity", NA)
+        curr_up = curr.get("unit_price", NA)
+        curr_tot = curr.get("total_order_value", NA)
+
+        # Check if current item is an incomplete half-row
+        is_curr_incomplete = (
+            curr_pn != NA and (curr_up == NA or curr_up == 0 or curr_qty == NA or curr_qty == 0) and
+            (curr_tot == NA or curr_tot == 0)
+        )
+
+        if is_curr_incomplete and i + 1 < len(items):
+            nxt = items[i + 1]
+            nxt_pn = nxt.get("product_name", NA)
+            nxt_qty = nxt.get("ordered_quantity", NA)
+            nxt_up = nxt.get("unit_price", NA)
+            nxt_tot = nxt.get("total_order_value", NA)
+
+            # Check if next item is the matching continuation half
+            is_nxt_continuation = (
+                (nxt_up != NA and nxt_up > 0 or nxt_tot != NA and nxt_tot > 0 or nxt_qty != NA and nxt_qty > 0) and
+                (nxt_pn == NA or len(str(nxt_pn)) < 3 or _is_product_continuation_cell(str(nxt_pn)) or
+                 str(nxt_pn).lower().startswith(('catalogue', 'selling', 'category', 'model', 'hsn', 'reseller', 'oem', 'unbranded leg press', str(curr_pn).lower()[:15])))
+            )
+
+            if is_nxt_continuation:
+                # FUSE curr and nxt into one complete item
+                merged_item = {
+                    "product_name": curr_pn if curr_pn != NA else nxt_pn,
+                    "brand": curr.get("brand", NA) if curr.get("brand", NA) != NA else nxt.get("brand", NA),
+                    "brand_type": curr.get("brand_type", NA) if curr.get("brand_type", NA) != NA else nxt.get("brand_type", NA),
+                    "category_name_quadrant": nxt.get("category_name_quadrant", NA) if nxt.get("category_name_quadrant", NA) != NA else curr.get("category_name_quadrant", NA),
+                    "model": nxt.get("model", NA) if nxt.get("model", NA) != NA else curr.get("model", NA),
+                    "hsn_code": nxt.get("hsn_code", NA) if nxt.get("hsn_code", NA) != NA else curr.get("hsn_code", NA),
+                    "ordered_quantity": nxt_qty if nxt_qty != NA else curr_qty,
+                    "unit_price": nxt_up if nxt_up != NA else curr_up,
+                    "total_order_value": nxt_tot if nxt_tot != NA else curr_tot,
+                }
+                # Reconcile math
+                q = merged_item["ordered_quantity"]
+                up = merged_item["unit_price"]
+                if q != NA and up != NA and isinstance(q, (int, float)) and isinstance(up, (int, float)):
+                    merged_item["total_order_value"] = round(q * up, 2)
+
+                fused_items.append(merged_item)
+                i += 2
+                continue
+
+        # If curr itself is an orphan ghost row with no product name and no prices, skip it
+        if curr_pn == NA and (curr_up == NA or curr_up == 0) and (curr_tot == NA or curr_tot == 0):
+            i += 1
+            continue
+
+        fused_items.append(curr)
+        i += 1
+
+    return fused_items
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MULTI-PRODUCT ITEM PARSER (Continuous Multi-Page Table Tracking & Row Fusion)
+# ──────────────────────────────────────────────────────────────────────────────
+
 def parse_all_product_items(raw_text: str, doc: Optional[Any] = None) -> List[Dict[str, Any]]:
     """
     Comprehensive multi-product extractor combining continuous multi-page table tracking
-    with structured text-stream parsing for 100% item coverage.
+    with cross-page row continuation stitching and structured text-stream parsing for 100% item coverage.
     """
     table_items = []
     active_col_map = None
+    pending_incomplete_row: Optional[Dict[str, Any]] = None
 
-    # 1. Primary Method: PyMuPDF 2D Table Extraction across all pages with column-map continuity
+    # 1. Primary Method: PyMuPDF 2D Table Extraction across all pages with stateful row fusion
     if doc:
         try:
             for page in doc:
                 page_text = page.get_text("text")
-                if not any(k in page_text for k in ["Product Details", "उत्पाद विवरण", "उ|पाद", "उ{पाद", "उxपाद", "उzपाद", "Item Description", "Ordered Quantity", "Unit Price", "इकाई मू"]):
+                is_prod_page = any(k in page_text for k in [
+                    "Product Details", "उत्पाद विवरण", "उ|पाद", "उ{पाद", "उxपाद", "उzपाद",
+                    "Item Description", "Ordered Quantity", "Unit Price", "इकाई मू",
+                    "Catalogue Status", "कैटलॉग की स्थिति", "Category Name", "श्रेणी का नाम"
+                ])
+
+                if not is_prod_page:
                     if active_col_map and any(k in page_text for k in ["Consignee Detail", "परेषिती", "Terms and Conditions"]):
                         active_col_map = None
                     continue
@@ -1182,8 +1311,58 @@ def parse_all_product_items(raw_text: str, doc: Optional[Any] = None) -> List[Di
                                 active_col_map = None
                                 break
 
-                            item_desc_cell = str(data_row[curr_map['item_desc']]) if 'item_desc' in curr_map and curr_map['item_desc'] < len(data_row) and data_row[curr_map['item_desc']] else ""
-                            if not item_desc_cell or not any(k in item_desc_cell.lower() for k in ['product name', 'उत्पाद', 'उ{', 'उ|', 'उx', 'उz', 'brand', 'ब्रांड', 'category']):
+                            desc_idx = curr_map.get('item_desc', 1 if len(data_row) > 1 else 0)
+                            item_desc_cell = str(data_row[desc_idx]).strip() if desc_idx < len(data_row) and data_row[desc_idx] else ""
+
+                            # Case A: Check if this row is the 2nd-half continuation of a pending incomplete row from previous page
+                            if pending_incomplete_row is not None:
+                                is_cont = _is_product_continuation_cell(item_desc_cell) or not any(k in item_desc_cell.lower() for k in ['product name', 'उत्पाद', 'उ{', 'उ|', 'उx', 'उz'])
+                                qty_cand, up_cand, tot_cand = _extract_numbers_from_row(data_row, curr_map)
+                                has_nums = (qty_cand != NA or up_cand != NA or tot_cand != NA)
+
+                                if is_cont or has_nums:
+                                    # FUSE pending row with current continuation row
+                                    fused_cell_text = pending_incomplete_row['raw_cell'] + "\n" + item_desc_cell
+                                    parsed_desc = parse_product_cell(fused_cell_text)
+
+                                    p_name = parsed_desc.get("product_name", NA)
+                                    if p_name == NA:
+                                        p_name = pending_incomplete_row.get("product_name", NA)
+                                    brand_val = parsed_desc.get("brand", NA)
+                                    if brand_val == NA:
+                                        brand_val = pending_incomplete_row.get("brand", NA)
+                                    cat_val = parsed_desc.get("category_name_quadrant", NA)
+                                    model_val = parsed_desc.get("model", NA)
+                                    hsn_val = parsed_desc.get("hsn_code", NA)
+                                    brand_type_val = parsed_desc.get("brand_type", NA)
+                                    if brand_type_val == NA:
+                                        brand_type_val = pending_incomplete_row.get("brand_type", NA)
+
+                                    if cat_val == NA and 'category' in curr_map and curr_map['category'] < len(data_row) and data_row[curr_map['category']]:
+                                        cat_val = clean_category_quadrant(str(data_row[curr_map['category']]))
+
+                                    if model_val == NA and 'model' in curr_map and curr_map['model'] < len(data_row) and data_row[curr_map['model']]:
+                                        model_val = clean_text(str(data_row[curr_map['model']]))
+
+                                    table_items.append({
+                                        "product_name": p_name,
+                                        "brand": brand_val,
+                                        "category_name_quadrant": cat_val,
+                                        "ordered_quantity": qty_cand,
+                                        "unit_price": up_cand,
+                                        "total_order_value": tot_cand,
+                                        "model": model_val,
+                                        "hsn_code": hsn_val,
+                                        "brand_type": brand_type_val,
+                                    })
+                                    pending_incomplete_row = None
+                                    continue
+                                else:
+                                    # Pending row was not continued; flush it if it had content
+                                    table_items.append(pending_incomplete_row['item_dict'])
+                                    pending_incomplete_row = None
+
+                            if not item_desc_cell or not any(k in item_desc_cell.lower() for k in ['product name', 'उत्पाद', 'उ{', 'उ|', 'उx', 'उz', 'brand', 'ब्रांड', 'category', 'catalogue', 'selling as', 'model', 'hsn']):
                                 continue
 
                             parsed_desc = parse_product_cell(item_desc_cell)
@@ -1197,12 +1376,32 @@ def parse_all_product_items(raw_text: str, doc: Optional[Any] = None) -> List[Di
                             if cat_val == NA and 'category' in curr_map and curr_map['category'] < len(data_row) and data_row[curr_map['category']]:
                                 cat_val = clean_category_quadrant(str(data_row[curr_map['category']]))
 
-                            # Extract model from dedicated column if available and not in desc
                             if model_val == NA and 'model' in curr_map and curr_map['model'] < len(data_row) and data_row[curr_map['model']]:
                                 model_val = clean_text(str(data_row[curr_map['model']]))
 
-                            # Robustly extract numeric fields with lot-number disambiguation
+                            # Extract numeric fields
                             qty_val, unit_price_val, total_price_val = _extract_numbers_from_row(data_row, curr_map)
+
+                            # Case B: If row has product name but NO prices/quantities, it might be split at page bottom!
+                            if p_name != NA and qty_val == NA and unit_price_val == NA and total_price_val == NA:
+                                pending_incomplete_row = {
+                                    'raw_cell': item_desc_cell,
+                                    'product_name': p_name,
+                                    'brand': brand_val,
+                                    'brand_type': brand_type_val,
+                                    'item_dict': {
+                                        "product_name": p_name,
+                                        "brand": brand_val,
+                                        "category_name_quadrant": cat_val,
+                                        "ordered_quantity": qty_val,
+                                        "unit_price": unit_price_val,
+                                        "total_order_value": total_price_val,
+                                        "model": model_val,
+                                        "hsn_code": hsn_val,
+                                        "brand_type": brand_type_val,
+                                    }
+                                }
+                                continue
 
                             if qty_val == NA and unit_price_val == NA and total_price_val == NA and p_name == NA:
                                 continue
@@ -1218,6 +1417,12 @@ def parse_all_product_items(raw_text: str, doc: Optional[Any] = None) -> List[Di
                                 "hsn_code": hsn_val,
                                 "brand_type": brand_type_val,
                             })
+
+            # Flush any remaining pending row at end of document
+            if pending_incomplete_row is not None:
+                table_items.append(pending_incomplete_row['item_dict'])
+                pending_incomplete_row = None
+
         except Exception:
             pass
 
@@ -1245,9 +1450,6 @@ def parse_all_product_items(raw_text: str, doc: Optional[Any] = None) -> List[Di
         unit_price_val = NA
         total_val = NA
 
-        # Numbers after HSN Code / Model — extract strictly in order
-        # Pattern: lot#\npieces/qty_unit\nunit_price\nNA/tax\ntotal
-        # or: qty\nunit\nunit_price\ntax\ntotal
         num_lines = re.findall(r'\n\s*([\d,]+(?:\.\d+)?)\s*(?:\n|$)', blk)
         valid_nums = []
         for n in num_lines:
@@ -1255,14 +1457,10 @@ def parse_all_product_items(raw_text: str, doc: Optional[Any] = None) -> List[Di
             if num != NA:
                 valid_nums.append(num)
 
-        # Also look for the total price from explicit "Total Order Value" context
         m_total = re.search(r'Total\s*Order\s*Value[^\d]*([\d,]+(?:\.\d+)?)', blk, re.IGNORECASE)
         explicit_total = to_number(m_total.group(1)) if m_total else NA
 
         if len(valid_nums) >= 3:
-            # Could be [qty, unit_price, tax_or_total, total] or [lot, qty, unit_price, total]
-            # Heuristic: if valid_nums[0] is small (1-20) and valid_nums[0]*valid_nums[1] != valid_nums[2],
-            # try valid_nums[0]=qty, valid_nums[1]=unit_price, valid_nums[2]=total
             q0, p0, t0 = valid_nums[0], valid_nums[1], valid_nums[2]
             if abs(q0 * p0 - t0) <= 2.0:
                 qty_val, unit_price_val, total_val = q0, p0, t0
@@ -1271,14 +1469,12 @@ def parse_all_product_items(raw_text: str, doc: Optional[Any] = None) -> List[Di
                 if abs(q1 * p1 - t1) <= 2.0:
                     qty_val, unit_price_val, total_val = q1, p1, t1
                 else:
-                    # Try back-calculation: total/qty = unit_price
                     if explicit_total != NA and q0 > 0:
                         up = round(explicit_total / q0, 2)
                         qty_val, unit_price_val, total_val = q0, up, explicit_total
                     else:
                         qty_val, unit_price_val, total_val = q0, p0, t0
             else:
-                # Math doesn't match with 3 numbers; try total / unit_price = qty
                 if t0 > p0 and p0 > 0:
                     back_q = t0 / p0
                     if abs(back_q - round(back_q)) < 0.01:
@@ -1320,12 +1516,10 @@ def parse_all_product_items(raw_text: str, doc: Optional[Any] = None) -> List[Di
     elif len(table_items) > 0 and len(text_items) == len(table_items):
         for i, t_it in enumerate(table_items):
             txt_it = text_items[i]
-            # Merge missing/NA fields from text_items into table_items
             for field in ["product_name", "brand", "category_name_quadrant", "ordered_quantity",
                           "unit_price", "total_order_value", "model", "hsn_code", "brand_type"]:
                 if t_it.get(field) == NA and txt_it.get(field) != NA:
                     t_it[field] = txt_it[field]
-            # Prefer text_items for numeric fields if math is consistent
             txt_qty = txt_it.get("ordered_quantity", NA)
             txt_up = txt_it.get("unit_price", NA)
             txt_tot = txt_it.get("total_order_value", NA)
@@ -1339,17 +1533,8 @@ def parse_all_product_items(raw_text: str, doc: Optional[Any] = None) -> List[Di
     if not final_items and text_items:
         final_items = text_items
 
-    # 3. Fallback Brand search from Product Specification headers if brand is NA
-    for it in final_items:
-        if it.get("brand") == NA:
-            m_spec_title = re.search(
-                r'Product\s*Specification\s*for\s*(?:(?:Unbranded\s+)?([A-Za-z0-9\s]+?))\s+(?:Gym|Ankle|Oven|Dustbin|Chamber|Couch|Centrifuge|Concentrator|Table|Wheel|Mirror|Chest Press|Surf Board|Twister|Leg Press|Air Walker|Parallel Bar|Sit Up|Hand Grip|Infantometer|Stadiometer|Monitor)',
-                raw_text, re.IGNORECASE
-            )
-            if m_spec_title:
-                cand = sanitize_brand(m_spec_title.group(1))
-                if cand != NA and len(cand) <= 30:
-                    it["brand"] = cand
+    # 3. Post-Extraction Sibling Deduplication and Fusion (Fuses any remaining split items across page breaks)
+    final_items = _reconcile_and_fuse_items(final_items)
 
     return final_items
 
